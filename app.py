@@ -1,26 +1,52 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
-import geopandas as gpd
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, shape, mapping
+from shapely.ops import transform
+import pyproj
 import math
+import json
 import io
 
-# 1. Класс анализатора (без изменений)
+# ============================================================================
+# ФУНКЦИИ КОНВЕРТАЦИИ КООРДИНАТ
+# ============================================================================
+
+def wgs84_to_meters(geom):
+    """Конвертация из WGS84 (градусы) в Web Mercator (метры)"""
+    project = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    return transform(project.transform, geom)
+
+def meters_to_wgs84(geom):
+    """Конвертация из Web Mercator (метры) в WGS84 (градусы)"""
+    project = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+    return transform(project.transform, geom)
+
+# ============================================================================
+# КЛАСС АНАЛИЗАТОРА
+# ============================================================================
+
 class UrbanPotentialAnalyzer:
     def __init__(self, parcel_geom_meters, pzz_config):
+        """
+        Инициализация анализатора.
+        :param parcel_geom_meters: геометрия участка в метрах (EPSG:3857)
+        :param pzz_config: словарь с параметрами градостроительных регламентов
+        """
         self.parcel_geom = parcel_geom_meters
         self.pzz = pzz_config
         self.buildable_geom = None
         self.tep = {}
 
     def calculate_buildable_area(self):
+        """Вычисление строительного пятна с учетом отступов"""
         min_offset = self.pzz.get("min_offset_from_border", 0)
         buildable = self.parcel_geom.buffer(-min_offset)
         self.buildable_geom = buildable
         return buildable
 
     def calculate_tep(self):
+        """Расчет технико-экономических показателей"""
         if self.buildable_geom is None:
             self.calculate_buildable_area()
             
@@ -32,6 +58,7 @@ class UrbanPotentialAnalyzer:
         living_ratio = self.pzz.get("living_area_ratio", 0.7)
         norm_housing = self.pzz.get("norm_housing_per_person", 28.0)
         
+        # Ограничение по плотности ПЗЗ
         s_zas_max = s_uch * max_density
         s_zas = min(s_buildable, s_zas_max)
         
@@ -53,12 +80,19 @@ class UrbanPotentialAnalyzer:
         }
         return self.tep
 
-# 2. Настройка страницы
+# ============================================================================
+# STREAMLIT ИНТЕРФЕЙС
+# ============================================================================
+
+# Настройка страницы
 st.set_page_config(page_title="Градостроительный Потенциал", layout="wide")
 st.title("🏙️ Анализатор градостроительного потенциала")
 st.markdown("Интерактивный расчет ТЭП и выявление строительного пятна на основе ПЗЗ.")
 
-# 3. Загрузка данных
+# ============================================================================
+# ЗАГРУЗКА ДАННЫХ
+# ============================================================================
+
 st.header("📂 Загрузка территории")
 
 # Вариант выбора: тестовые данные или загрузка файла
@@ -72,50 +106,38 @@ parcel_geom_meters = None
 parcel_geom_wgs84 = None
 
 if data_source == "Загрузить свой файл":
-    st.info("💡 Поддерживаемые форматы: GeoJSON (.geojson, .json), GeoPackage (.gpkg), Shapefile (.shp - требуется .shx, .dbf, .prj)")
+    st.info("💡 Поддерживаемый формат: **GeoJSON** (.geojson, .json)")
     
     uploaded_file = st.file_uploader(
-        "Загрузите файл с границами участка",
-        type=['geojson', 'json', 'gpkg', 'zip'],
-        help="Файл должен содержать полигональную геометрию"
+        "Загрузите GeoJSON файл с границами участка",
+        type=['geojson', 'json'],
+        help="Файл должен содержать полигональную геометрию в системе координат WGS84 (EPSG:4326)"
     )
     
     if uploaded_file is not None:
         try:
-            # Чтение загруженного файла
-            file_bytes = io.BytesIO(uploaded_file.getvalue())
-            gdf_uploaded = gpd.read_file(file_bytes)
+            # Читаем как обычный JSON
+            geojson_data = json.loads(uploaded_file.getvalue().decode("utf-8"))
             
-            # Проверка на наличие геометрии
-            if gdf_uploaded.empty:
-                st.error("Файл пуст или не содержит геометрии")
+            # Извлекаем геометрию
+            if geojson_data['type'] == 'FeatureCollection':
+                geom_dict = geojson_data['features'][0]['geometry']
+            elif geojson_data['type'] == 'Feature':
+                geom_dict = geojson_data['geometry']
             else:
-                # Объединение всех полигонов в один (если их несколько)
-                parcel_geom_wgs84 = gdf_uploaded.geometry.unary_union
-                
-                # Конвертация в метры для расчетов
-                if gdf_uploaded.crs is None:
-                    st.warning("⚠️ В файле не указана система координат. Предполагается WGS84 (EPSG:4326)")
-                    gdf_uploaded = gdf_uploaded.set_crs("EPSG:4326")
-                
-                # Если координаты уже в метрах, пропускаем конвертацию
-                if gdf_uploaded.crs.is_projected:
-                    gdf_meters = gdf_uploaded
-                    gdf_wgs84 = gdf_uploaded.to_crs("EPSG:4326")
-                else:
-                    gdf_meters = gdf_uploaded.to_crs("EPSG:3857")
-                    gdf_wgs84 = gdf_uploaded
-                
-                parcel_geom_meters = gdf_meters.geometry.unary_union
-                
-                st.success(f"✅ Файл успешно загружен! Площадь участка: {parcel_geom_meters.area:,.0f} м²")
-                
+                geom_dict = geojson_data
+            
+            parcel_geom_wgs84 = shape(geom_dict)
+            parcel_geom_meters = wgs84_to_meters(parcel_geom_wgs84)
+            
+            st.success(f"✅ Файл успешно загружен! Площадь участка: {parcel_geom_meters.area:,.0f} м²")
+            
         except Exception as e:
             st.error(f"❌ Ошибка при чтении файла: {str(e)}")
-            st.info("Попробуйте другой формат или проверьте целостность файла.")
+            st.info("Убедитесь, что файл в формате GeoJSON и содержит валидную геометрию.")
 
 else:
-    # Тестовые данные
+    # Тестовые данные (условный участок в центре Москвы)
     st.info("Используется демонстрационный участок в центре Москвы")
     coords_wgs84 = [
         (37.61500, 55.75200),
@@ -124,12 +146,13 @@ else:
         (37.61500, 55.75350)
     ]
     
-    gdf_wgs84 = gpd.GeoDataFrame(geometry=[Polygon(coords_wgs84)], crs="EPSG:4326")
-    gdf_meters = gdf_wgs84.to_crs("EPSG:3857")
-    parcel_geom_meters = gdf_meters.geometry.iloc[0]
-    parcel_geom_wgs84 = gdf_wgs84.geometry.iloc[0]
+    parcel_geom_wgs84 = Polygon(coords_wgs84)
+    parcel_geom_meters = wgs84_to_meters(parcel_geom_wgs84)
 
-# 4. Параметры ПЗЗ (только если есть геометрия)
+# ============================================================================
+# ПАРАМЕТРЫ ПЗЗ И РАСЧЕТ
+# ============================================================================
+
 if parcel_geom_meters is not None:
     st.sidebar.header("⚙️ Параметры ПЗЗ и Регламента")
     offset = st.sidebar.slider("Мин. отступ от границ (м)", 0, 30, 5, help="Отступ от красных линий")
@@ -146,16 +169,15 @@ if parcel_geom_meters is not None:
         "norm_housing_per_person": norm_housing
     }
 
-    # 5. Запуск анализатора
+    # Запуск анализатора
     analyzer = UrbanPotentialAnalyzer(parcel_geom_meters, pzz_config)
     tep = analyzer.calculate_tep()
     buildable_geom_meters = analyzer.buildable_geom
 
-    # Обратная конвертация для карты
-    gdf_buildable_meters = gpd.GeoDataFrame(geometry=[buildable_geom_meters], crs="EPSG:3857")
-    gdf_buildable_wgs84 = gdf_buildable_meters.to_crs("EPSG:4326")
-
-    # 6. Отображение ТЭП
+    # ========================================================================
+    # ОТОБРАЖЕНИЕ ТЭП
+    # ========================================================================
+    
     st.header("📊 Технико-экономические показатели")
     cols = st.columns(4)
     cols[0].metric("Общая площадь (GBA)", f"{tep['s_total']:,.0f} м²")
@@ -169,27 +191,33 @@ if parcel_geom_meters is not None:
     infra_cols[1].info(f"🧸 Детские сады: **{tep['kindergartens']}** мест")
     infra_cols[2].info(f"🚗 Парковка: **{tep['parking']}** м/м")
 
-    # 7. Карта
+    # ========================================================================
+    # КАРТА
+    # ========================================================================
+    
     st.header("🗺️ Карта территории и строительного пятна")
     
     # Получаем центр участка для позиционирования карты
-    centroid = gdf_buildable_wgs84.geometry.iloc[0].centroid
+    centroid = parcel_geom_wgs84.centroid
     center_lat = centroid.y
     center_lon = centroid.x
     
     m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles="OpenStreetMap")
 
-    # Исходный участок
-    gdf_parcel_wgs84 = gpd.GeoDataFrame(geometry=[parcel_geom_wgs84], crs="EPSG:4326")
+    # Создаём GeoJSON словари для folium (без geopandas!)
+    parcel_geojson = {"type": "Feature", "properties": {}, "geometry": mapping(parcel_geom_wgs84)}
+    buildable_geojson = {"type": "Feature", "properties": {}, "geometry": mapping(meters_to_wgs84(buildable_geom_meters))}
+
+    # Исходный участок (Красный контур)
     folium.GeoJson(
-        gdf_parcel_wgs84,
+        parcel_geojson,
         name="Границы участка",
         style_function=lambda x: {"fillColor": "gray", "fillOpacity": 0.1, "color": "red", "weight": 3}
     ).add_to(m)
 
-    # Пятно застройки
+    # Пятно застройки (Синий полигон)
     folium.GeoJson(
-        gdf_buildable_wgs84,
+        buildable_geojson,
         name="Пятно застройки",
         style_function=lambda x: {"fillColor": "blue", "fillOpacity": 0.4, "color": "blue", "weight": 2}
     ).add_to(m)
@@ -202,7 +230,7 @@ if parcel_geom_meters is not None:
     # Кнопка скачивания результатов
     st.download_button(
         label="📥 Скачать ТЭП (JSON)",
-        data=io.BytesIO(str(tep).encode()),
+        data=io.BytesIO(json.dumps(tep, ensure_ascii=False, indent=2).encode()),
         file_name="tep_results.json",
         mime="application/json"
     )
