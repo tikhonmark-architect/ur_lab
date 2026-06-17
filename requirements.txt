@@ -4,3 +4,4 @@ streamlit-folium
 shapely
 pyproj
 pandas
+numpy
