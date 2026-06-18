@@ -9,16 +9,20 @@ import csv
 import math
 from datetime import datetime
 
-st.set_page_config(page_title="Градостроительный Потенциал", layout="wide")
-st.title("🏙️ Анализатор градостроительного потенциала")
-st.markdown("**Упрощённая версия для Streamlit Cloud**")
+# ============================================================================
+# НАСТРОЙКА СТРАНИЦЫ
+# ============================================================================
+
+st.set_page_config(page_title="Градостроительный Потенциал PRO", layout="wide")
+st.title("️ Анализатор градостроительного потенциала PRO")
+st.markdown("**Полный комплексный анализ:** ТЭП + Финансы + 3D + Инсоляция")
 
 # ============================================================================
-# ФУНКЦИИ (упрощённые без pyproj)
+# ФУНКЦИИ
 # ============================================================================
 
 def parse_geojson(file_content):
-    """Парсинг GeoJSON"""
+    """Парсинг GeoJSON файла"""
     try:
         data = json.loads(file_content.decode("utf-8"))
         if data['type'] == 'FeatureCollection':
@@ -31,10 +35,10 @@ def parse_geojson(file_content):
     except Exception as e:
         raise ValueError(f"Ошибка GeoJSON: {str(e)}")
 
-def calculate_area_simple(geom):
+def calculate_area_approximate(geom):
     """
-    Упрощённый расчёт площади.
-    Если координаты в градусах - используем приближённую формулу.
+    Приближённый расчёт площади для полигона в градусах.
+    Конвертирует градусы в метры и считает площадь.
     """
     if geom is None or geom.is_empty:
         return 0
@@ -42,34 +46,71 @@ def calculate_area_simple(geom):
     bounds = geom.bounds
     minx, miny, maxx, maxy = bounds
     
-    # Определяем, градусы это или метры
+    # Проверяем, градусы это или метры
     if abs(maxx - minx) < 10 and abs(maxy - miny) < 10:
-        # Это градусы - конвертируем в метры приблизительно
-        # 1 градус долготы ≈ 111320 * cos(latitude) метров
-        # 1 градус широты ≈ 110540 метров
-        lat = (miny + maxy) / 2
-        lon_to_meters = 111320 * math.cos(math.radians(lat))
-        lat_to_meters = 110540
+        # Это градусы - конвертируем в метры
+        lat_center = (miny + maxy) / 2
+        lon_to_m = 111320 * math.cos(math.radians(lat_center))
+        lat_to_m = 110540
         
-        width_meters = (maxx - minx) * lon_to_meters
-        height_meters = (maxy - miny) * lat_to_meters
-        
-        # Приближённая площадь (для сложных полигонов это неточно, но работает)
-        return geom.area * lon_to_meters * lat_to_meters
+        # Считаем площадь через интеграл (упрощённо)
+        area_degrees = geom.area
+        area_meters = area_degrees * lon_to_m * lat_to_m
+        return area_meters
     else:
         # Уже в метрах
         return geom.area
 
-def wgs84_to_web_mercator(geom):
-    """Конвертация WGS84 в Web Mercator для отображения"""
-    def project(x, y):
-        x_merc = x * 20037508.34 / 180
-        y_merc = math.log(math.tan((90 + y) * math.pi / 360)) / (math.pi / 180)
-        y_merc = y_merc * 20037508.34 / 180
-        return x_merc, y_merc
+def is_in_degrees(geom):
+    """Проверяет, в градусах ли координаты"""
+    if geom is None:
+        return False
+    bounds = geom.bounds
+    minx, miny, maxx, maxy = bounds
+    return abs(maxx - minx) < 10 and abs(maxy - miny) < 10
+
+def create_obj_file(geometry, height_meters):
+    """Создание OBJ файла из 2D полигона"""
+    if geometry is None or geometry.is_empty:
+        return ""
     
-    from shapely.ops import transform
-    return transform(project, geom)
+    coords = list(geometry.exterior.coords) if geometry.geom_type == 'Polygon' else None
+    if not coords or len(coords) < 3:
+        return ""
+    
+    min_x = min(c[0] for c in coords)
+    min_y = min(c[1] for c in coords)
+    
+    lines = []
+    lines.append("# Building 3D Model")
+    lines.append(f"# Height: {height_meters:.1f}m")
+    lines.append("")
+    
+    # Вершины основания
+    for x, y in coords[:-1]:
+        lines.append(f"v {x - min_x:.2f} {y - min_y:.2f} 0.0")
+    
+    # Вершины крыши
+    for x, y in coords[:-1]:
+        lines.append(f"v {x - min_x:.2f} {y - min_y:.2f} {height_meters:.2f}")
+    
+    lines.append("")
+    
+    n = len(coords) - 1
+    lines.append("f " + " ".join(str(i+1) for i in range(n)))
+    lines.append("f " + " ".join(str(i+1+n) for i in range(n)))
+    
+    for i in range(n):
+        next_i = (i + 1) % n
+        lines.append(f"f {i+1} {next_i+1} {next_i+1+n} {i+1+n}")
+    
+    return "\n".join(lines)
+
+def calculate_shadow_length(building_height, latitude=55.75):
+    """Расчет длины тени"""
+    solar_angle = 90 - abs(latitude + 23.45)
+    solar_angle_rad = math.radians(max(solar_angle, 5))
+    return building_height / math.tan(solar_angle_rad)
 
 # ============================================================================
 # КЛАСС АНАЛИЗАТОРА
@@ -83,10 +124,11 @@ class UrbanAnalyzer:
         self.tep = {}
         self.financials = {}
         
-        if manual_area:
+        # Используем ручную площадь или считаем автоматически
+        if manual_area and manual_area > 0:
             self.area = manual_area
         else:
-            self.area = calculate_area_simple(parcel_geom)
+            self.area = calculate_area_approximate(parcel_geom)
 
     def calculate_buildable(self):
         offset = self.pzz.get("offset", 5)
@@ -96,7 +138,14 @@ class UrbanAnalyzer:
         max_buildable = self.area * density
         
         self.buildable_geom = buildable
-        self.buildable_area = min(buildable.area, max_buildable) if buildable else 0
+        
+        # Для пятна застройки считаем площадь пропорционально
+        if buildable and not buildable.is_empty:
+            buildable_area_approx = calculate_area_approximate(buildable)
+            self.buildable_area = min(buildable_area_approx, max_buildable)
+        else:
+            self.buildable_area = 0
+        
         return buildable
 
     def calculate_tep(self):
@@ -125,7 +174,8 @@ class UrbanAnalyzer:
             "population": population,
             "schools": math.ceil(population / 1000 * 120),
             "kindergartens": math.ceil(population / 1000 * 60),
-            "parking": math.ceil(s_total / 100 * 1.2)
+            "parking": math.ceil(s_total / 100 * 1.2),
+            "green_space": math.ceil(population * 6)
         }
         return self.tep
 
@@ -135,84 +185,197 @@ class UrbanAnalyzer:
         
         cost = self.pzz.get("cost", 90000)
         price = self.pzz.get("price", 250000)
+        commercial_ratio = self.pzz.get("commercial_ratio", 0.85)
         land = self.pzz.get("land", 50000000)
         
         s_living = self.tep["s_living"]
         s_commercial = self.tep["s_commercial"]
         s_total = self.tep["s_total"]
         
-        revenue = s_living * price + s_commercial * price * 0.85
-        construction = s_total * cost
-        total_cost = construction + land
+        revenue_living = s_living * price
+        revenue_commercial = s_commercial * price * commercial_ratio
+        total_revenue = revenue_living + revenue_commercial
         
-        profit = revenue - total_cost
+        construction_cost = s_total * cost
+        infra_cost = (self.tep["schools"] * 1500000 + 
+                      self.tep["kindergartens"] * 1200000 + 
+                      self.tep["parking"] * 800000)
+        total_cost = construction_cost + land + infra_cost
+        
+        profit = total_revenue - total_cost
         roi = (profit / total_cost * 100) if total_cost > 0 else 0
+        profit_per_sqm = (profit / s_total) if s_total > 0 else 0
         
         self.financials = {
-            "revenue": revenue,
-            "cost": total_cost,
+            "revenue_living": revenue_living,
+            "revenue_commercial": revenue_commercial,
+            "total_revenue": total_revenue,
+            "construction_cost": construction_cost,
+            "infra_cost": infra_cost,
+            "land_cost": land,
+            "total_cost": total_cost,
             "profit": profit,
-            "roi": roi
+            "roi": roi,
+            "profit_per_sqm": profit_per_sqm
         }
         return self.financials
 
 # ============================================================================
-# ИНТЕРФЕЙС
+# ЗАГРУЗКА ДАННЫХ
 # ============================================================================
 
-st.header("📂 Загрузка участка")
+st.header("📂 Загрузка территории")
 
-data_source = st.radio("Источник:", ["Тестовый участок", "Загрузить GeoJSON"], horizontal=True)
+data_source = st.radio(
+    "Выберите источник данных:",
+    ["Тестовый участок (пример)", "Загрузить свой файл"],
+    horizontal=True
+)
 
 parcel_geom = None
 manual_area = None
 
-if data_source == "Загрузить GeoJSON":
-    uploaded = st.file_uploader("Загрузите .geojson или .json", type=['geojson', 'json'])
+if data_source == "Загрузить свой файл":
+    st.info("💡 **Рекомендуется GeoJSON** в системе координат WGS84 (EPSG:4326)")
     
-    if uploaded:
+    uploaded_file = st.file_uploader(
+        "Загрузите GeoJSON файл с границами участка",
+        type=['geojson', 'json'],
+        key="main_parcel"
+    )
+    
+    if uploaded_file is not None:
         try:
-            content = uploaded.getvalue()
+            content = uploaded_file.getvalue()
             parcel_geom = parse_geojson(content)
             
-            # Показываем диагностику
-            area_calc = calculate_area_simple(parcel_geom)
-            st.info(f"📏 **Автоматически определена площадь:** {area_calc:,.0f} м²")
+            # Диагностика
+            area_calc = calculate_area_approximate(parcel_geom)
+            bounds = parcel_geom.bounds
             
-            use_manual = st.checkbox("✏️ Ввести площадь вручную", value=False)
+            with st.expander("🔍 Диагностика геометрии"):
+                st.write(f"**Диапазон координат:**")
+                st.write(f"- X (долгота): {bounds[0]:.6f} - {bounds[2]:.6f}")
+                st.write(f"- Y (широта): {bounds[1]:.6f} - {bounds[3]:.6f}")
+                st.write(f"**Автоматически рассчитанная площадь:** {area_calc:,.0f} м²")
+                
+                if is_in_degrees(parcel_geom):
+                    st.success("✅ Координаты в градусах (WGS84)")
+                else:
+                    st.warning("⚠️ Координаты в метрах (не WGS84)")
+            
+            # Ручная коррекция
+            use_manual = st.checkbox("✏️ Использовать ручную коррекцию площади", value=False)
             if use_manual:
-                manual_area = st.number_input("Площадь (м²):", min_value=1.0, value=1400.0, step=10.0)
-                st.success(f"✅ Используется площадь: {manual_area:,.0f} м²")
+                manual_area = st.number_input(
+                    "Введите реальную площадь участка (м²):",
+                    min_value=1.0,
+                    value=1400.0,
+                    step=10.0
+                )
+                st.success(f"✅ Будет использоваться площадь: **{manual_area:,.0f} м²**")
             
-            st.success("✅ Файл загружен!")
+            st.success(f"✅ Файл загружен! Площадь: {area_calc:,.0f} м²")
             
         except Exception as e:
             st.error(f"❌ Ошибка: {str(e)}")
+
 else:
     # Тестовый участок (координаты в градусах)
     coords = [(37.615, 55.752), (37.6175, 55.752), (37.6175, 55.7535), (37.615, 55.7535)]
     parcel_geom = Polygon(coords)
-    st.info("Используется тестовый участок")
+    st.info("Используется демонстрационный участок в центре Москвы")
 
 # ============================================================================
-# ПАРАМЕТРЫ
+# ПАРАМЕТРЫ (РУЧНОЙ ВВОД)
 # ============================================================================
 
-if parcel_geom:
+if parcel_geom is not None:
     st.sidebar.header("⚙️ Градостроительные параметры")
-    offset = st.sidebar.number_input("Отступ (м)", 0.0, 50.0, 5.0, 0.5)
-    density = st.sidebar.number_input("Плотность", 0.05, 1.0, 0.4, 0.01)
-    floors = st.sidebar.number_input("Этажность", 1, 50, 9, 1)
-    floor_height = st.sidebar.number_input("Высота этажа (м)", 2.5, 5.0, 3.2, 0.1)
-    living_ratio = st.sidebar.number_input("Доля жилья", 0.0, 1.0, 0.75, 0.01)
-    norm = st.sidebar.number_input("Норма (м²/чел)", 10, 50, 28, 1)
     
-    st.sidebar.header("💰 Финансы")
-    cost = st.sidebar.number_input("Себестоимость (₽/м²)", 10000, 300000, 90000, 1000)
-    price = st.sidebar.number_input("Цена продажи (₽/м²)", 50000, 1000000, 250000, 5000)
-    land = st.sidebar.number_input("Земля (млн ₽)", 0.0, 1000.0, 50.0, 1.0) * 1000000
+    offset = st.sidebar.number_input(
+        "Мин. отступ от границ (м)",
+        min_value=0.0,
+        max_value=100.0,
+        value=5.0,
+        step=0.5
+    )
     
-    pzz = {
+    density = st.sidebar.number_input(
+        "Макс. плотность застройки",
+        min_value=0.05,
+        max_value=1.0,
+        value=0.40,
+        step=0.01
+    )
+    
+    floors = st.sidebar.number_input(
+        "Предельная этажность",
+        min_value=1,
+        max_value=100,
+        value=9,
+        step=1
+    )
+    
+    floor_height = st.sidebar.number_input(
+        "Высота этажа (м)",
+        min_value=2.5,
+        max_value=6.0,
+        value=3.2,
+        step=0.1
+    )
+    
+    living_ratio = st.sidebar.number_input(
+        "Доля жилой площади",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.75,
+        step=0.01
+    )
+    
+    norm = st.sidebar.number_input(
+        "Норма жилья на чел. (кв.м)",
+        min_value=10.0,
+        max_value=100.0,
+        value=28.0,
+        step=1.0
+    )
+    
+    st.sidebar.header("💰 Финансовые параметры")
+    
+    cost = st.sidebar.number_input(
+        "Себестоимость строительства (₽/м²)",
+        min_value=10000,
+        max_value=500000,
+        value=90000,
+        step=1000
+    )
+    
+    price = st.sidebar.number_input(
+        "Цена продажи жилья (₽/м²)",
+        min_value=50000,
+        max_value=2000000,
+        value=250000,
+        step=5000
+    )
+    
+    commercial_ratio = st.sidebar.number_input(
+        "Коэфф. цены коммерции",
+        min_value=0.1,
+        max_value=3.0,
+        value=0.85,
+        step=0.05
+    )
+    
+    land_cost_mln = st.sidebar.number_input(
+        "Стоимость земли (млн ₽)",
+        min_value=0.0,
+        max_value=10000.0,
+        value=50.0,
+        step=1.0
+    )
+    
+    pzz_config = {
         "offset": offset,
         "density": density,
         "floors": floors,
@@ -221,106 +384,271 @@ if parcel_geom:
         "norm": norm,
         "cost": cost,
         "price": price,
-        "land": land
+        "commercial_ratio": commercial_ratio,
+        "land": land_cost_mln * 1000000
     }
     
-    analyzer = UrbanAnalyzer(parcel_geom, pzz, manual_area)
+    # Запуск анализатора
+    analyzer = UrbanAnalyzer(parcel_geom, pzz_config, manual_area)
     tep = analyzer.calculate_tep()
-    fin = analyzer.calculate_financials()
+    financials = analyzer.calculate_financials()
+    
+    # Проверка на нулевые значения
+    if tep['s_total'] <= 0:
+        st.error("❌ **Ошибка:** Общая площадь равна нулю. Проверьте параметры (отступы, плотность, этажность).")
+        st.stop()
     
     # ========================================================================
-    # РЕЗУЛЬТАТЫ
+    # ОТОБРАЖЕНИЕ ТЭП
     # ========================================================================
     
-    st.header("📊 ТЭП")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Участок", f"{tep['s_uch']:,.0f} м²", f"{tep['s_uch_ha']} га")
-    c2.metric("Пятно", f"{tep['s_buildable']:,.0f} м²")
-    c3.metric("GBA", f"{tep['s_total']:,.0f} м²")
-    c4.metric("Этажи", f"{tep['floors']} эт")
+    st.header("📊 Технико-экономические показатели")
     
-    st.subheader("🏗️ Структура")
-    ac1, ac2, ac3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Площадь участка", f"{tep['s_uch']:,.0f} м²", f"{tep['s_uch_ha']} га")
+    col2.metric("Пятно застройки", f"{tep['s_buildable']:,.0f} м²")
+    col3.metric("Общая площадь (GBA)", f"{tep['s_total']:,.0f} м²")
+    col4.metric("Этажность", f"{tep['floors']} эт", f"{tep['building_height']} м")
+    
+    st.subheader("🏗️ Структура площадей")
+    
     if tep['s_total'] > 0:
-        lp = tep['s_living']/tep['s_total']*100
-        cp = tep['s_commercial']/tep['s_total']*100
+        living_percent = (tep['s_living'] / tep['s_total']) * 100
+        commercial_percent = (tep['s_commercial'] / tep['s_total']) * 100
     else:
-        lp = cp = 0
-    ac1.info(f"🏠 Жилая: {tep['s_living']:,.0f} м² ({lp:.1f}%)")
-    ac2.info(f"🏢 Коммерция: {tep['s_commercial']:,.0f} м² ({cp:.1f}%)")
-    ac3.info(f"👪 Население: {tep['population']} чел")
+        living_percent = 0
+        commercial_percent = 0
     
-    st.header("💰 Финансы")
-    f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Выручка", f"{fin['revenue']/1e6:,.1f} млн ₽")
-    f2.metric("Затраты", f"{fin['cost']/1e6:,.1f} млн ₽")
-    profit_color = "normal" if fin['profit'] >= 0 else "inverse"
-    f3.metric("Прибыль", f"{fin['profit']/1e6:,.1f} млн ₽", delta_color=profit_color)
-    f4.metric("ROI", f"{fin['roi']:.1f}%", delta_color=profit_color)
+    area_cols = st.columns(3)
+    area_cols[0].info(f"🏠 **Жилая:** {tep['s_living']:,.0f} м² ({living_percent:.1f}%)")
+    area_cols[1].info(f"🏢 **Коммерция:** {tep['s_commercial']:,.0f} м² ({commercial_percent:.1f}%)")
+    area_cols[2].info(f"🌳 **Озеленение:** {tep['green_space']:,.0f} м²")
+    
+    st.subheader("👥 Социальная инфраструктура")
+    infra_cols = st.columns(4)
+    infra_cols[0].info(f" **Население:** {tep['population']:,} чел")
+    infra_cols[1].info(f"🏫 **Школы:** {tep['schools']} мест")
+    infra_cols[2].info(f"🧸 **Дет. сады:** {tep['kindergartens']} мест")
+    infra_cols[3].info(f" **Парковка:** {tep['parking']} м/м")
+    
+    # ========================================================================
+    # ФИНАНСОВЫЕ ПОКАЗАТЕЛИ
+    # ========================================================================
+    
+    st.header(" Финансовая модель")
+    
+    fin_cols = st.columns(4)
+    fin_cols[0].metric("Выручка (GDV)", f"{financials['total_revenue']/1000000:,.1f} млн ₽")
+    fin_cols[1].metric("Затраты", f"{financials['total_cost']/1000000:,.1f} млн ₽")
+    
+    profit_color = "normal" if financials['profit'] >= 0 else "inverse"
+    fin_cols[2].metric("Валовая прибыль", f"{financials['profit']/1000000:,.1f} млн ₽", delta_color=profit_color)
+    fin_cols[3].metric("Рентабельность (ROI)", f"{financials['roi']}%", delta_color=profit_color)
+    
+    with st.expander("📈 Детализация финансового расчета"):
+        st.write(f"**Выручка от жилья:** {financials['revenue_living']/1000000:,.1f} млн ₽")
+        st.write(f"**Выручка от коммерции:** {financials['revenue_commercial']/1000000:,.1f} млн ₽")
+        st.write("---")
+        st.write(f"**Затраты на строительство:** {financials['construction_cost']/1000000:,.1f} млн ₽")
+        st.write(f"**Затраты на инфраструктуру:** {financials['infra_cost']/1000000:,.1f} млн ₽")
+        st.write(f"**Стоимость земли:** {financials['land_cost']/1000000:,.1f} млн ₽")
+        st.write("---")
+        st.write(f"**💎 Прибыль с 1 м²:** {financials['profit_per_sqm']:,.0f} ₽")
+    
+    # ========================================================================
+    # АНАЛИЗ ИНСОЛЯЦИИ
+    # ========================================================================
+    
+    st.header("☀️ Анализ инсоляции")
+    building_height = tep['building_height']
+    
+    # Определяем широту из геометрии
+    bounds = parcel_geom.bounds
+    latitude = (bounds[1] + bounds[3]) / 2
+    
+    shadow_length = calculate_shadow_length(building_height, latitude)
+    
+    st.info(f" **Высота здания:** {building_height:.1f} м | **Широта:** {latitude:.2f}° | **Длина тени:** {shadow_length:.1f} м")
+    
+    if shadow_length > 50:
+        st.warning(f"⚠️ Тень достигает **{shadow_length:.0f}м**. Рекомендуется детальная инсоляционная экспертиза!")
+    
+    if building_height > 75:
+        st.error(f"🚨 Здание выше 75м требует обязательной разработки СТУ")
     
     # ========================================================================
     # КАРТА
     # ========================================================================
     
-    st.header("🗺️ Карта")
+    st.header("🗺️ Карта территории и строительного пятна")
     
     bounds = parcel_geom.bounds
     center_lat = (bounds[1] + bounds[3]) / 2
     center_lon = (bounds[0] + bounds[2]) / 2
     
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=16)
-    
-    # Участок
-    if abs(bounds[0]) < 180:  # Если в градусах
-        parcel_geo = {"type": "Feature", "geometry": mapping(parcel_geom)}
-    else:  # Если в метрах - конвертируем
-        parcel_merc = wgs84_to_web_mercator(parcel_geom)
-        parcel_geo = {"type": "Feature", "geometry": mapping(parcel_merc)}
-    
-    folium.GeoJson(parcel_geo, style_function=lambda x: {
-        "fillColor": "gray", "fillOpacity": 0.1, "color": "red", "weight": 3
-    }).add_to(m)
-    
-    # Пятно застройки
-    if analyzer.buildable_geom and not analyzer.buildable_geom.is_empty:
-        if abs(bounds[0]) < 180:
-            build_geo = {"type": "Feature", "geometry": mapping(analyzer.buildable_geom)}
-        else:
-            build_merc = wgs84_to_web_mercator(analyzer.buildable_geom)
-            build_geo = {"type": "Feature", "geometry": mapping(build_merc)}
+    # Проверяем тип координат
+    if is_in_degrees(parcel_geom):
+        # Координаты в градусах - отображаем напрямую
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles="OpenStreetMap")
         
-        folium.GeoJson(build_geo, style_function=lambda x: {
-            "fillColor": "blue", "fillOpacity": 0.4, "color": "blue", "weight": 2
-        }).add_to(m)
-    
-    st_folium(m, width=1200, height=500)
+        # Участок
+        parcel_geo = {
+            "type": "Feature",
+            "properties": {"name": "Участок", "area_m2": tep['s_uch']},
+            "geometry": mapping(parcel_geom)
+        }
+        
+        folium.GeoJson(
+            parcel_geo,
+            name="Границы участка",
+            style_function=lambda x: {
+                "fillColor": "gray",
+                "fillOpacity": 0.1,
+                "color": "red",
+                "weight": 3
+            },
+            tooltip=folium.GeoJsonTooltip(fields=["name", "area_m2"], aliases=["Объект:", "Площадь:"])
+        ).add_to(m)
+        
+        # Пятно застройки
+        if analyzer.buildable_geom and not analyzer.buildable_geom.is_empty:
+            build_geo = {
+                "type": "Feature",
+                "properties": {"name": "Пятно застройки", "area_m2": tep['s_buildable']},
+                "geometry": mapping(analyzer.buildable_geom)
+            }
+            
+            folium.GeoJson(
+                build_geo,
+                name="Пятно застройки",
+                style_function=lambda x: {
+                    "fillColor": "blue",
+                    "fillOpacity": 0.4,
+                    "color": "blue",
+                    "weight": 2
+                },
+                tooltip=folium.GeoJsonTooltip(fields=["name", "area_m2"], aliases=["Объект:", "Площадь:"])
+            ).add_to(m)
+        
+        folium.LayerControl().add_to(m)
+        st_folium(m, width=1200, height=600)
+        
+    else:
+        # Координаты в метрах - показываем предупреждение
+        st.warning(f"""
+        ⚠️ **Координаты в метрах** (не градусы WGS84)
+        
+        Диапазон координат:
+        - X: {bounds[0]:,.0f} - {bounds[2]:,.0f}
+        - Y: {bounds[1]:,.0f} - {bounds[3]:,.0f}
+        
+        Для отображения на карте конвертируйте файл в **WGS84 (EPSG:4326)** через QGIS:
+        1. Откройте слой в QGIS
+        2. Правой кнопкой → Export → Save Features As
+        3. Format: GeoJSON
+        4. CRS: **EPSG:4326 - WGS 84** (укажите вручную!)
+        5. Сохраните и загрузите заново
+        """)
+        
+        # Показываем простую карту
+        m = folium.Map(location=[55.75, 37.62], zoom_start=10)
+        folium.Marker(
+            [55.75, 37.62],
+            popup="Участок загружен, но координаты в метрах"
+        ).add_to(m)
+        st_folium(m, width=1200, height=300)
     
     # ========================================================================
-    # ЭКСПОРТ
+    # ЭКСПОРТ ДАННЫХ
     # ========================================================================
     
-    st.header("📥 Экспорт")
-    ec1, ec2 = st.columns(2)
+    st.header("📥 Экспорт результатов")
     
-    with ec1:
-        report = {"tep": tep, "financials": fin}
-        st.download_button("📊 JSON", 
-            data=io.BytesIO(json.dumps(report, indent=2).encode()),
-            file_name="report.json", mime="application/json")
+    export_cols = st.columns(4)
     
-    with ec2:
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(["Показатель", "Значение"])
-        for k, v in tep.items():
-            w.writerow([k, v])
-        for k, v in fin.items():
-            w.writerow([k, v])
-        st.download_button("📄 CSV",
-            data=io.BytesIO(buf.getvalue().encode('utf-8-sig')),
-            file_name="tep.csv", mime="text/csv")
+    with export_cols[0]:
+        full_report = {
+            "metadata": {
+                "generated": datetime.now().isoformat(),
+                "latitude": latitude,
+                "longitude": center_lon
+            },
+            "tep": tep,
+            "financials": financials,
+            "pzz_parameters": pzz_config
+        }
+        st.download_button(
+            label="📊 Полный отчет (JSON)",
+            data=io.BytesIO(json.dumps(full_report, ensure_ascii=False, indent=2).encode()),
+            file_name="urban_analysis_report.json",
+            mime="application/json"
+        )
     
-    st.success("✅ Готово!")
+    with export_cols[1]:
+        if analyzer.buildable_geom and not analyzer.buildable_geom.is_empty:
+            buildable_export = {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {
+                        "name": "Пятно застройки",
+                        "area_m2": tep['s_buildable'],
+                        "area_ha": tep['s_buildable'] / 10000
+                    },
+                    "geometry": mapping(analyzer.buildable_geom)
+                }]
+            }
+            st.download_button(
+                label="🗺️ Пятно застройки (GeoJSON)",
+                data=io.BytesIO(json.dumps(buildable_export, ensure_ascii=False, indent=2).encode()),
+                file_name="buildable_area.geojson",
+                mime="application/json"
+            )
+    
+    with export_cols[2]:
+        obj_content = create_obj_file(analyzer.buildable_geom, building_height)
+        if obj_content:
+            st.download_button(
+                label="🏢 3D модель (OBJ)",
+                data=io.BytesIO(obj_content.encode()),
+                file_name="building_3d.obj",
+                mime="text/plain"
+            )
+        else:
+            st.warning("3D недоступна")
+    
+    with export_cols[3]:
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["Показатель", "Значение", "Ед.изм."])
+        writer.writerow(["Площадь участка", tep['s_uch'], "м²"])
+        writer.writerow(["Площадь участка", tep['s_uch_ha'], "га"])
+        writer.writerow(["Пятно застройки", tep['s_buildable'], "м²"])
+        writer.writerow(["Общая площадь", tep['s_total'], "м²"])
+        writer.writerow(["Жилая площадь", tep['s_living'], "м²"])
+        writer.writerow(["Коммерческая площадь", tep['s_commercial'], "м²"])
+        writer.writerow(["Этажность", tep['floors'], "эт"])
+        writer.writerow(["Высота здания", tep['building_height'], "м"])
+        writer.writerow(["Население", tep['population'], "чел"])
+        writer.writerow(["Школы", tep['schools'], "мест"])
+        writer.writerow(["Детские сады", tep['kindergartens'], "мест"])
+        writer.writerow(["Парковка", tep['parking'], "м/м"])
+        writer.writerow(["Выручка", financials['total_revenue'], "₽"])
+        writer.writerow(["Затраты", financials['total_cost'], "₽"])
+        writer.writerow(["Прибыль", financials['profit'], "₽"])
+        writer.writerow(["ROI", financials['roi'], "%"])
+        
+        st.download_button(
+            label="📄 ТЭП в Excel (CSV)",
+            data=io.BytesIO(csv_buffer.getvalue().encode('utf-8-sig')),
+            file_name="tep_report.csv",
+            mime="text/csv"
+        )
+    
+    st.success("✅ Полный анализ завершен! Все данные готовы к экспорту.")
 
 else:
-    st.warning("⚠️ Загрузите файл или выберите тестовый участок")
+    st.warning("⚠️ Загрузите файл с границами участка или выберите тестовые данные для начала анализа.")
+
+st.markdown("---")
+st.caption("🛠️ Urban Potential Analyzer PRO | Упрощённая версия для Streamlit Cloud")
