@@ -7,13 +7,33 @@ import pyproj
 import math
 import json
 import io
-import zipfile
-import tempfile
-import os
+import csv
 from datetime import datetime
 
 # ============================================================================
-# ФУНКЦИИ ПАРСИНГА РАЗЛИЧНЫХ ФОРМАТОВ
+# БЕЗОПАСНЫЕ ИМПОРТЫ ОПЦИОНАЛЬНЫХ БИБЛИОТЕК
+# ============================================================================
+
+DXF_AVAILABLE = False
+SHP_AVAILABLE = False
+
+try:
+    import ezdxf
+    DXF_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    import shapefile as shp
+    import zipfile
+    import tempfile
+    import os
+    SHP_AVAILABLE = True
+except ImportError:
+    pass
+
+# ============================================================================
+# ФУНКЦИИ ПАРСИНГА ФАЙЛОВ
 # ============================================================================
 
 def parse_geojson(file_content):
@@ -32,20 +52,16 @@ def parse_geojson(file_content):
         raise ValueError(f"Ошибка парсинга GeoJSON: {str(e)}")
 
 def parse_dxf(file_content):
-    """
-    Парсинг DXF файла (AutoCAD)
-    Извлекает замкнутые полилинии и конвертирует в полигоны
-    """
+    """Парсинг DXF файла (AutoCAD)"""
+    if not DXF_AVAILABLE:
+        raise ValueError("Библиотека ezdxf не установлена. Используйте GeoJSON формат.")
+    
     try:
-        import ezdxf
-        
-        # Читаем DXF из байтов
         doc = ezdxf.read(io.BytesIO(file_content))
         msp = doc.modelspace()
         
         polygons = []
         
-        # Ищем все замкнутые полилинии
         for entity in msp:
             if entity.dxftype() == 'LWPOLYLINE':
                 if entity.closed:
@@ -60,42 +76,32 @@ def parse_dxf(file_content):
                         polygons.append(Polygon(points))
         
         if not polygons:
-            raise ValueError("В DXF файле не найдено замкнутых полилиний. Убедитесь, что границы участка нарисованы замкнутыми POLYLINE или LWPOLYLINE.")
+            raise ValueError("В DXF файле не найдено замкнутых полилиний.")
         
-        # Объединяем все найденные полигоны
         return unary_union(polygons)
         
-    except ImportError:
-        raise ValueError("Библиотека ezdxf не установлена")
     except Exception as e:
         raise ValueError(f"Ошибка парсинга DXF: {str(e)}")
 
 def parse_shapefile(zip_content):
-    """
-    Парсинг Shapefile из ZIP-архива
-    Ожидает архив с файлами .shp, .shx, .dbf (и опционально .prj)
-    """
+    """Парсинг Shapefile из ZIP-архива"""
+    if not SHP_AVAILABLE:
+        raise ValueError("Библиотека pyshp не установлена. Используйте GeoJSON формат.")
+    
     try:
-        import shapefile as shp
-        
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = os.path.join(tmpdir, 'shapefile.zip')
             with open(zip_path, 'wb') as f:
                 f.write(zip_content)
             
-            # Распаковываем архив
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir)
             
-            # Ищем .shp файл
             shp_files = [f for f in os.listdir(tmpdir) if f.endswith('.shp')]
             if not shp_files:
                 raise ValueError("В ZIP-архиве не найден файл .shp")
             
-            # Путь к shapefile без расширения
             shp_path = os.path.join(tmpdir, shp_files[0].replace('.shp', ''))
-            
-            # Читаем shapefile
             sf = shp.Reader(shp_path)
             shapes = sf.shapes()
             
@@ -104,7 +110,6 @@ def parse_shapefile(zip_content):
             
             polygons = []
             for shape_record in shapes:
-                # Типы полигонов: 5 (Polygon), 15 (PolygonZ), 25 (PolygonM)
                 if shape_record.shapeType in [5, 15, 25]:
                     points = shape_record.points
                     if len(points) >= 3:
@@ -115,8 +120,6 @@ def parse_shapefile(zip_content):
             
             return unary_union(polygons)
             
-    except ImportError:
-        raise ValueError("Библиотека pyshp не установлена")
     except Exception as e:
         raise ValueError(f"Ошибка парсинга Shapefile: {str(e)}")
 
@@ -161,25 +164,20 @@ def calculate_geodesic_area(geom_wgs84):
     return 0
 
 def detect_coordinate_system(geom):
-    """
-    Определяет систему координат по размеру bounding box
-    Если координаты в диапазоне -180..180 и -90..90 - это градусы (WGS84)
-    Иначе предполагаем, что это уже метры
-    """
-    bounds = geom.bounds  # (minx, miny, maxx, maxy)
+    """Определяет систему координат по размеру bounding box"""
+    bounds = geom.bounds
     minx, miny, maxx, maxy = bounds
     
-    # Проверяем, похожи ли координаты на градусы
     if -180 <= minx <= 180 and -90 <= miny <= 90 and -180 <= maxx <= 180 and -90 <= maxy <= 90:
-        return "WGS84"  # Градусы
+        return "WGS84"
     else:
-        return "METERS"  # Уже в метрах
+        return "METERS"
 
 # ============================================================================
-# ФУНКЦИИ ДЛЯ 3D ЭКСПОРТА И ИНСОЛЯЦИИ (без изменений)
+# ФУНКЦИИ ДЛЯ 3D ЭКСПОРТА И ИНСОЛЯЦИИ
 # ============================================================================
 
-def create_obj_file(geometry_meters, height_meters, filename="building.obj"):
+def create_obj_file(geometry_meters, height_meters):
     """Создание OBJ файла из 2D полигона с экструзией"""
     if geometry_meters is None or geometry_meters.is_empty:
         return ""
@@ -236,7 +234,7 @@ def calculate_shadow_length(building_height, latitude=55.75):
     return shadow_length
 
 # ============================================================================
-# КЛАСС АНАЛИЗАТОРА (без изменений)
+# КЛАСС АНАЛИЗАТОРА
 # ============================================================================
 
 class UrbanPotentialAnalyzer:
@@ -353,7 +351,7 @@ class UrbanPotentialAnalyzer:
 
 st.set_page_config(page_title="Градостроительный Потенциал PRO", layout="wide")
 st.title("🏙️ Анализатор градостроительного потенциала PRO")
-st.markdown("**Поддерживаемые форматы:** GeoJSON, DXF (AutoCAD), Shapefile (ZIP)")
+st.markdown("**Полный комплексный анализ:** Точный расчет ТЭП + Финансы + 3D + Инсоляция + ЗОУИТ")
 
 # ============================================================================
 # ЗАГРУЗКА ДАННЫХ
@@ -372,45 +370,55 @@ parcel_geom_wgs84 = None
 restrictions_geom_meters = None
 
 if data_source == "Загрузить свой файл":
-    st.info("""
-    💡 **Поддерживаемые форматы:**
-    - **GeoJSON** (.geojson, .json) - рекомендуется
-    - **DXF** (.dxf) - экспорт из AutoCAD (File → Save As → DXF)
-    - **Shapefile** (.zip) - архив с файлами .shp, .shx, .dbf
+    # Показываем доступные форматы
+    available_formats = ["GeoJSON (.geojson, .json)"]
+    if DXF_AVAILABLE:
+        available_formats.append("AutoCAD DXF (.dxf)")
+    if SHP_AVAILABLE:
+        available_formats.append("Shapefile (.zip)")
     
-    ⚠️ **Важно:** Если координаты в метрах (местная система), они будут автоматически конвертированы в WGS84 (градусы) для отображения на карте.
+    st.info(f"""
+     **Поддерживаемые форматы:** {', '.join(available_formats)}
+    
+    ✅ **Рекомендуется GeoJSON** - работает на всех платформах.
+    
+     **Как конвертировать в GeoJSON:**
+    - **AutoCAD:** File → Save As → DXF, затем откройте в QGIS и экспортируйте в GeoJSON
+    - **Shapefile:** Откройте в QGIS → Export → Save Features As → GeoJSON
     """)
     
     # Выбор формата
     file_format = st.selectbox(
         "Выберите формат файла:",
-        ["GeoJSON (.geojson, .json)", "AutoCAD DXF (.dxf)", "Shapefile (.zip)"],
-        help="Выберите формат вашего файла для корректного парсинга"
+        available_formats,
+        help="GeoJSON рекомендуется для стабильной работы"
     )
     
-    # Основной участок
+    # Загрузка файла в зависимости от формата
+    uploaded_file = None
+    
     if file_format == "GeoJSON (.geojson, .json)":
         uploaded_file = st.file_uploader(
             "1️⃣ Загрузите GeoJSON файл с границами участка",
             type=['geojson', 'json'],
             key="main_parcel"
         )
-    elif file_format == "AutoCAD DXF (.dxf)":
+    elif file_format == "AutoCAD DXF (.dxf)" and DXF_AVAILABLE:
         uploaded_file = st.file_uploader(
             "1️⃣ Загрузите DXF файл (экспорт из AutoCAD)",
             type=['dxf'],
             key="main_parcel"
         )
-    else:  # Shapefile
+    elif file_format == "Shapefile (.zip)" and SHP_AVAILABLE:
         uploaded_file = st.file_uploader(
-            "1️⃣ Загрузите ZIP-архив с Shapefile (.shp, .shx, .dbf)",
+            "1️ Загрузите ZIP-архив с Shapefile (.shp, .shx, .dbf)",
             type=['zip'],
             key="main_parcel"
         )
     
     # Ограничения (только GeoJSON)
     uploaded_restrictions = st.file_uploader(
-        "2️⃣ Загрузите GeoJSON с ограничениями (ЗОУИТ) - *опционально*",
+        "2️ Загрузите GeoJSON с ограничениями (ЗОУИТ) - *опционально*",
         type=['geojson', 'json'],
         key="restrictions"
     )
@@ -424,7 +432,7 @@ if data_source == "Загрузить свой файл":
                 geom = parse_geojson(file_content)
             elif file_format == "AutoCAD DXF (.dxf)":
                 geom = parse_dxf(file_content)
-            else:  # Shapefile
+            else:
                 geom = parse_shapefile(file_content)
             
             if geom is None or geom.is_empty:
@@ -434,22 +442,15 @@ if data_source == "Загрузить свой файл":
                 coord_system = detect_coordinate_system(geom)
                 
                 if coord_system == "WGS84":
-                    # Координаты в градусах
                     parcel_geom_wgs84 = geom
                     parcel_geom_meters = wgs84_to_meters(geom)
                     st.success(f"✅ Файл загружен! **Система координат:** WGS84 (градусы)")
                 else:
-                    # Координаты уже в метрах - нужно конвертировать обратно
-                    # Предполагаем, что это локальная метрическая система
-                    # Для корректного отображения на карте нужно знать параметры проекции
                     st.warning("""
                     ⚠️ **Обнаружены координаты в метрах** (локальная система координат).
                     
-                    Для корректного отображения на карте рекомендуется:
-                    1. Экспортировать файл из AutoCAD/GIS с системой координат **WGS84 (EPSG:4326)**
-                    2. Или использовать **GeoJSON** формат с координатами в градусах
-                    
-                    Сейчас координаты будут интерпретированы как Web Mercator (EPSG:3857).
+                    Для корректного отображения на карте рекомендуется использовать **GeoJSON** 
+                    с системой координат **WGS84 (EPSG:4326)**.
                     """)
                     parcel_geom_meters = geom
                     parcel_geom_wgs84 = meters_to_wgs84(geom)
@@ -486,7 +487,7 @@ else:
     parcel_geom_meters = wgs84_to_meters(parcel_geom_wgs84)
 
 # ============================================================================
-# ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ (параметры, расчеты, карта, экспорт)
+# ПАРАМЕТРЫ ПЗЗ И ФИНАНСОВ
 # ============================================================================
 
 if parcel_geom_meters is not None:
@@ -523,7 +524,11 @@ if parcel_geom_meters is not None:
     buildable_geom_meters = analyzer.buildable_geom
     buildable_geom_wgs84 = analyzer.buildable_geom_wgs84
 
-    st.header("📊 Технико-экономические показатели")
+    # ========================================================================
+    # ОТОБРАЖЕНИЕ ТЭП
+    # ========================================================================
+    
+    st.header(" Технико-экономические показатели")
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Площадь участка", f"{tep['s_uch']:,.0f} м²", f"{tep['s_uch_ha']} га")
@@ -539,11 +544,15 @@ if parcel_geom_meters is not None:
 
     st.subheader("👥 Социальная инфраструктура")
     infra_cols = st.columns(4)
-    infra_cols[0].info(f"👪 **Население:** {tep['population']:,} чел")
+    infra_cols[0].info(f" **Население:** {tep['population']:,} чел")
     infra_cols[1].info(f"🏫 **Школы:** {tep['schools']} мест")
     infra_cols[2].info(f"🧸 **Дет. сады:** {tep['kindergartens']} мест")
     infra_cols[3].info(f"🚗 **Парковка:** {tep['parking']} м/м")
 
+    # ========================================================================
+    # ФИНАНСОВЫЕ ПОКАЗАТЕЛИ
+    # ========================================================================
+    
     st.header("💰 Финансовая модель")
     
     fin_cols = st.columns(4)
@@ -564,6 +573,10 @@ if parcel_geom_meters is not None:
         st.write("---")
         st.write(f"**💎 Прибыль с 1 м²:** {financials['profit_per_sqm']:,.0f} ₽")
 
+    # ========================================================================
+    # АНАЛИЗ ИНСОЛЯЦИИ
+    # ========================================================================
+    
     st.header("☀️ Анализ инсоляции")
     building_height = tep['building_height_m']
     centroid_wgs84 = parcel_geom_wgs84.centroid
@@ -574,60 +587,158 @@ if parcel_geom_meters is not None:
     
     if shadow_length > 50:
         st.warning(f"⚠️ Тень достигает **{shadow_length:.0f}м**. Рекомендуется детальная инсоляционная экспертиза!")
+    
+    if building_height > 75:
+        st.error(f"🚨 Здание выше 75м требует обязательной разработки СТУ")
 
-    st.header("🗺️ Карта территории")
+    # ========================================================================
+    # КАРТА
+    # ========================================================================
+    
+    st.header("🗺️ Карта территории и строительного пятна")
     
     center_lat = centroid_wgs84.y
     center_lon = centroid_wgs84.x
     
     m = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles="OpenStreetMap")
 
-    parcel_geojson = {"type": "Feature", "properties": {"name": "Участок"}, "geometry": mapping(parcel_geom_wgs84)}
-    folium.GeoJson(parcel_geojson, name="Границы участка", 
-                   style_function=lambda x: {"fillColor": "gray", "fillOpacity": 0.1, "color": "red", "weight": 3}).add_to(m)
+    parcel_geojson = {"type": "Feature", "properties": {"name": "Участок", "area_m2": tep['s_uch']}, "geometry": mapping(parcel_geom_wgs84)}
+    folium.GeoJson(
+        parcel_geojson,
+        name="Границы участка",
+        style_function=lambda x: {"fillColor": "gray", "fillOpacity": 0.1, "color": "red", "weight": 3},
+        tooltip=folium.GeoJsonTooltip(fields=["name", "area_m2"], aliases=["Объект:", "Площадь:"])
+    ).add_to(m)
 
     if buildable_geom_wgs84 is not None and not buildable_geom_wgs84.is_empty:
-        buildable_geojson = {"type": "Feature", "properties": {"name": "Пятно застройки"}, "geometry": mapping(buildable_geom_wgs84)}
-        folium.GeoJson(buildable_geojson, name="Пятно застройки",
-                       style_function=lambda x: {"fillColor": "blue", "fillOpacity": 0.4, "color": "blue", "weight": 2}).add_to(m)
+        buildable_geojson = {"type": "Feature", "properties": {"name": "Пятно застройки", "area_m2": tep['s_buildable']}, "geometry": mapping(buildable_geom_wgs84)}
+        folium.GeoJson(
+            buildable_geojson,
+            name="Пятно застройки",
+            style_function=lambda x: {"fillColor": "blue", "fillOpacity": 0.4, "color": "blue", "weight": 2},
+            tooltip=folium.GeoJsonTooltip(fields=["name", "area_m2"], aliases=["Объект:", "Площадь:"])
+        ).add_to(m)
+
+    if shadow_length > 0 and buildable_geom_meters is not None:
+        try:
+            shadow_zone_meters = buildable_geom_meters.buffer(shadow_length)
+            shadow_zone_wgs84 = meters_to_wgs84(shadow_zone_meters)
+            shadow_geojson = {"type": "Feature", "properties": {"name": f"Зона тени ({shadow_length:.0f}м)"}, "geometry": mapping(shadow_zone_wgs84)}
+            
+            folium.GeoJson(
+                shadow_geojson,
+                name=f"Зона тени ({shadow_length:.0f}м)",
+                style_function=lambda x: {"fillColor": "orange", "fillOpacity": 0.15, "color": "orange", "weight": 1, "dashArray": "5, 5"}
+            ).add_to(m)
+        except Exception as e:
+            pass
 
     if restrictions_geom_meters is not None:
         try:
             restrictions_wgs84 = meters_to_wgs84(restrictions_geom_meters)
-            restrictions_geojson = {"type": "Feature", "properties": {}, "geometry": mapping(restrictions_wgs84)}
-            folium.GeoJson(restrictions_geojson, name="Ограничения",
-                           style_function=lambda x: {"fillColor": "red", "fillOpacity": 0.3, "color": "darkred", "weight": 2}).add_to(m)
-        except:
+            restrictions_geojson = {"type": "Feature", "properties": {"name": "Ограничения (ЗОУИТ)"}, "geometry": mapping(restrictions_wgs84)}
+            folium.GeoJson(
+                restrictions_geojson,
+                name="Ограничения (ЗОУИТ)",
+                style_function=lambda x: {"fillColor": "red", "fillOpacity": 0.3, "color": "darkred", "weight": 2, "dashArray": "3, 3"}
+            ).add_to(m)
+        except Exception as e:
             pass
 
     folium.LayerControl().add_to(m)
     st_folium(m, width=1200, height=600)
 
-    st.header("📥 Экспорт результатов")
+    # ========================================================================
+    # ЭКСПОРТ ДАННЫХ
+    # ========================================================================
     
-    export_cols = st.columns(3)
+    st.header(" Экспорт результатов")
+    
+    export_cols = st.columns(4)
     
     with export_cols[0]:
-        full_report = {"tep": tep, "financials": financials, "pzz_parameters": pzz_config}
-        st.download_button("📊 Полный отчет (JSON)", 
-                          data=io.BytesIO(json.dumps(full_report, ensure_ascii=False, indent=2).encode()),
-                          file_name="urban_analysis_report.json", mime="application/json")
+        full_report = {
+            "metadata": {
+                "generated": datetime.now().isoformat(),
+                "latitude": latitude,
+                "longitude": center_lon
+            },
+            "tep": tep,
+            "financials": financials,
+            "pzz_parameters": pzz_config
+        }
+        st.download_button(
+            label="📊 Полный отчет (JSON)",
+            data=io.BytesIO(json.dumps(full_report, ensure_ascii=False, indent=2).encode()),
+            file_name="urban_analysis_report.json",
+            mime="application/json"
+        )
     
     with export_cols[1]:
         if buildable_geom_wgs84 is not None:
-            buildable_export = {"type": "Feature", "properties": {"area_m2": tep['s_buildable']}, "geometry": mapping(buildable_geom_wgs84)}
-            st.download_button("🗺️ Пятно застройки (GeoJSON)",
-                              data=io.BytesIO(json.dumps(buildable_export, ensure_ascii=False, indent=2).encode()),
-                              file_name="buildable_area.geojson", mime="application/json")
+            buildable_export = {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {
+                        "name": "Пятно застройки",
+                        "area_m2": tep['s_buildable'],
+                        "area_ha": tep['s_buildable'] / 10000
+                    },
+                    "geometry": mapping(buildable_geom_wgs84)
+                }]
+            }
+            st.download_button(
+                label="🗺️ Пятно застройки (GeoJSON)",
+                data=io.BytesIO(json.dumps(buildable_export, ensure_ascii=False, indent=2).encode()),
+                file_name="buildable_area.geojson",
+                mime="application/json"
+            )
     
     with export_cols[2]:
         obj_content = create_obj_file(buildable_geom_meters, building_height)
         if obj_content:
-            st.download_button("🏢 3D модель (OBJ)",
-                              data=io.BytesIO(obj_content.encode()),
-                              file_name="building_3d.obj", mime="text/plain")
+            st.download_button(
+                label=" 3D модель (OBJ)",
+                data=io.BytesIO(obj_content.encode()),
+                file_name="building_3d.obj",
+                mime="text/plain"
+            )
+        else:
+            st.warning("3D недоступна")
+    
+    with export_cols[3]:
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["Показатель", "Значение", "Ед.изм."])
+        writer.writerow(["Площадь участка", tep['s_uch'], "м²"])
+        writer.writerow(["Площадь участка", tep['s_uch_ha'], "га"])
+        writer.writerow(["Пятно застройки", tep['s_buildable'], "м²"])
+        writer.writerow(["Общая площадь", tep['s_total'], "м²"])
+        writer.writerow(["Жилая площадь", tep['s_living'], "м²"])
+        writer.writerow(["Коммерческая площадь", tep['s_commercial'], "м²"])
+        writer.writerow(["Этажность", tep['floors'], "эт"])
+        writer.writerow(["Высота здания", tep['building_height_m'], "м"])
+        writer.writerow(["Население", tep['population'], "чел"])
+        writer.writerow(["Школы", tep['schools'], "мест"])
+        writer.writerow(["Детские сады", tep['kindergartens'], "мест"])
+        writer.writerow(["Парковка", tep['parking'], "м/м"])
+        writer.writerow(["Выручка", financials['total_revenue'], "₽"])
+        writer.writerow(["Затраты", financials['total_cost'], "₽"])
+        writer.writerow(["Прибыль", financials['gross_profit'], "₽"])
+        writer.writerow(["ROI", financials['roi_percent'], "%"])
+        
+        st.download_button(
+            label="📄 ТЭП в Excel (CSV)",
+            data=io.BytesIO(csv_buffer.getvalue().encode('utf-8-sig')),
+            file_name="tep_report.csv",
+            mime="text/csv"
+        )
 
-    st.success("✅ Анализ завершен!")
+    st.success("✅ Полный анализ завершен! Все данные готовы к экспорту.")
 
 else:
-    st.warning("⚠️ Загрузите файл с границами участка для начала анализа.")
+    st.warning("⚠️ Загрузите файл с границами участка или выберите тестовые данные для начала анализа.")
+
+st.markdown("---")
+st.caption("️ Urban Potential Analyzer PRO | Точный геодезический расчет на эллипсоиде WGS84")
