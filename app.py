@@ -679,10 +679,23 @@ if parcel_geom is not None:
     buildable_geom = analyzer.buildable_geom
 
     # ========================================================================
-    # ТЭП
+    # ТЭП (ЗАЩИЩЁННАЯ ВЕРСИЯ)
     # ========================================================================
     
     st.header("📊 Технико-экономические показатели")
+    
+    # Ранняя диагностика пустого пятна
+    if tep['s_total'] == 0:
+        st.error("🚨 **Пятно застройки пустое!**")
+        st.warning(f"""
+        **Причина:** Невозможно построить здание с текущими параметрами.
+        
+        **Попробуйте:**
+        - Уменьшить отступы от границ (сейчас: {pzz_config['min_offset_from_border']} м)
+        - Увеличить плотность застройки (сейчас: {pzz_config['max_building_density']})
+        - Проверить ЗОУИТ — возможно, они перекрывают весь участок
+        """)
+        st.stop()  # Останавливаем выполнение до исправления параметров
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Площадь участка", f"{tep['s_uch']:,.0f} м²", f"{tep['s_uch_ha']} га")
@@ -692,8 +705,11 @@ if parcel_geom is not None:
 
     st.subheader("🏗️ Структура площадей")
     area_cols = st.columns(3)
-    area_cols[0].info(f"🏠 **Жилая:** {tep['s_living']:,.0f} м² ({tep['s_living']/tep['s_total']*100:.1f}%)")
-    area_cols[1].info(f"🏢 **Коммерция:** {tep['s_commercial']:,.0f} м² ({tep['s_commercial']/tep['s_total']*100:.1f}%)")
+    living_pct = safe_percentage(tep['s_living'], tep['s_total'])
+    commercial_pct = safe_percentage(tep['s_commercial'], tep['s_total'])
+    
+    area_cols[0].info(f"🏠 **Жилая:** {tep['s_living']:,.0f} м² ({living_pct:.1f}%)")
+    area_cols[1].info(f"🏢 **Коммерция:** {tep['s_commercial']:,.0f} м² ({commercial_pct:.1f}%)")
     area_cols[2].info(f"🌳 **Озеленение:** {tep['green_space']:,.0f} м²")
 
     st.subheader("👥 Социальная инфраструктура")
@@ -704,7 +720,7 @@ if parcel_geom is not None:
     infra_cols[3].info(f"🚗 **Парковка:** {tep['parking']} м/м")
 
     # ========================================================================
-    # ФИНАНСЫ
+    # ФИНАНСЫ (ЗАЩИЩЁННАЯ ВЕРСИЯ)
     # ========================================================================
     
     st.header("💰 Финансовая модель")
