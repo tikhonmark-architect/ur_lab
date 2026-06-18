@@ -219,7 +219,8 @@ class UrbanPotentialAnalyzer:
         
         gross_profit = total_revenue - total_cost
         roi = (gross_profit / total_cost * 100) if total_cost > 0 else 0
-                self.financials = {
+        
+        self.financials = {
             "revenue_living": round(revenue_living, 0),
             "revenue_commercial": round(revenue_commercial, 0),
             "total_revenue": round(total_revenue, 0),
