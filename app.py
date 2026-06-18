@@ -122,48 +122,55 @@ def check_shadow_overlap(building_geom, shadow_length, neighbor_geom):
 # ============================================================================
 
 class UrbanPotentialAnalyzer:
-    def __init__(self, parcel_geom_meters, pzz_config, restrictions_geom=None):
-        """
-        Инициализация анализатора.
-        :param parcel_geom_meters: геометрия участка в метрах
-        :param pzz_config: словарь с параметрами ПЗЗ
-        :param restrictions_geom: геометрия ограничений (ЗОУИТ) в метрах
-        """
-        self.parcel_geom = parcel_geom_meters
+    def __init__(self, parcel_geom, pzz_config, coord_system='auto', restrictions_geom=None):
+        self.parcel_geom = parcel_geom
         self.pzz = pzz_config
         self.restrictions = restrictions_geom
+        self.coord_system = coord_system if coord_system != 'auto' else detect_coordinate_system(parcel_geom)
         self.buildable_geom = None
         self.tep = {}
         self.financials = {}
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: корректный расчёт площади
+        self.real_area, _ = calculate_area_universal(parcel_geom)
 
     def calculate_buildable_area(self):
-        """Вычисление строительного пятна с учетом отступов и ЗОУИТ"""
-        # 1. Отступ от границ
         min_offset = self.pzz.get("min_offset_from_border", 0)
-        buildable = self.parcel_geom.buffer(-min_offset)
         
-        # 2. Вычитание ЗОУИТ (если есть)
+        # Если координаты в градусах — конвертируем в метры для buffer()
+        if self.coord_system == 'geographic':
+            work_geom = wgs84_to_meters(self.parcel_geom)
+        else:
+            work_geom = self.parcel_geom
+        
+        buildable = work_geom.buffer(-min_offset)
+        
         if self.restrictions is not None and not self.restrictions.is_empty:
-            buildable = buildable.difference(self.restrictions)
+            if self.coord_system == 'geographic':
+                restrictions_work = wgs84_to_meters(self.restrictions)
+            else:
+                restrictions_work = self.restrictions
+            buildable = buildable.difference(restrictions_work)
         
         self.buildable_geom = buildable
+        self.buildable_area, _ = calculate_area_universal(buildable)
         return buildable
 
-    def calculate_tep(self):        """Расчет технико-экономических показателей"""
+    def calculate_tep(self):
         if self.buildable_geom is None:
             self.calculate_buildable_area()
-            
-        s_uch = self.parcel_geom.area
-        s_buildable = self.buildable_geom.area if self.buildable_geom else 0
+        
+        s_uch = self.real_area
+        s_buildable = self.buildable_area
         
         max_density = self.pzz.get("max_building_density", 1.0)
         max_floors = self.pzz.get("max_floors", 1)
+        floor_height = self.pzz.get("floor_height", 3.2)
         living_ratio = self.pzz.get("living_area_ratio", 0.7)
         norm_housing = self.pzz.get("norm_housing_per_person", 28.0)
         
         s_zas_max = s_uch * max_density
-        s_zas = min(s_buildable, s_zas_max)
-        
+        s_zas = min(s_buildable, s_zas_max)        
         s_total = s_zas * max_floors
         s_living = s_total * living_ratio
         s_commercial = s_total - s_living
@@ -171,53 +178,58 @@ class UrbanPotentialAnalyzer:
         
         self.tep = {
             "s_uch": round(s_uch, 1),
+            "s_uch_ha": round(s_uch / 10000, 2),
             "s_buildable": round(s_buildable, 1),
             "s_zas": round(s_zas, 1),
             "s_total": round(s_total, 1),
             "s_living": round(s_living, 1),
             "s_commercial": round(s_commercial, 1),
             "floors": max_floors,
-            "building_height_m": max_floors * 3.2,
+            "building_height_m": round(max_floors * floor_height, 1),
             "population": population,
             "schools": math.ceil((population / 1000) * 120),
             "kindergartens": math.ceil((population / 1000) * 60),
-            "parking": math.ceil((s_total / 100) * 1.2)
+            "parking": math.ceil((s_total / 100) * 1.2),
+            "green_space": math.ceil(population * 6),
+            "coord_system": self.coord_system
         }
         return self.tep
 
     def calculate_financials(self):
-        """Расчет финансовых показателей"""
         if not self.tep:
             self.calculate_tep()
         
-        cost_per_sqm = self.pzz.get("construction_cost_per_sqm", 80000)
-        sale_price_per_sqm = self.pzz.get("sale_price_per_sqm", 200000)
+        cost_per_sqm = self.pzz.get("construction_cost_per_sqm", 90000)
+        sale_price_per_sqm = self.pzz.get("sale_price_per_sqm", 250000)
+        commercial_price_ratio = self.pzz.get("commercial_price_ratio", 0.85)
         land_cost = self.pzz.get("land_cost", 50000000)
         
         s_living = self.tep["s_living"]
         s_commercial = self.tep["s_commercial"]
         
-        # Выручка (только от продажи жилья и коммерции)
-        revenue_living = s_living * sale_price_per_sqm        revenue_commercial = s_commercial * sale_price_per_sqm * 0.8  # Коммерция обычно дешевле
+        revenue_living = s_living * sale_price_per_sqm
+        revenue_commercial = s_commercial * sale_price_per_sqm * commercial_price_ratio
         total_revenue = revenue_living + revenue_commercial
         
-        # Затраты
         construction_cost = self.tep["s_total"] * cost_per_sqm
-        total_cost = construction_cost + land_cost
+        infra_cost = (self.tep["schools"] * 1500000 + 
+                      self.tep["kindergartens"] * 1200000 + 
+                      self.tep["parking"] * 800000)
+        total_cost = construction_cost + land_cost + infra_cost
         
-        # Прибыль
         gross_profit = total_revenue - total_cost
         roi = (gross_profit / total_cost * 100) if total_cost > 0 else 0
-        
-        self.financials = {
+                self.financials = {
             "revenue_living": round(revenue_living, 0),
             "revenue_commercial": round(revenue_commercial, 0),
             "total_revenue": round(total_revenue, 0),
             "construction_cost": round(construction_cost, 0),
+            "infra_cost": round(infra_cost, 0),
             "land_cost": round(land_cost, 0),
             "total_cost": round(total_cost, 0),
             "gross_profit": round(gross_profit, 0),
-            "roi_percent": round(roi, 1)
+            "roi_percent": round(roi, 1),
+            "profit_per_sqm": round(gross_profit / self.tep["s_total"], 0) if self.tep["s_total"] > 0 else 0
         }
         return self.financials
 
