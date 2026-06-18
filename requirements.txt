@@ -2,6 +2,3 @@ streamlit
 folium
 streamlit-folium
 shapely
-pyproj
-pandas
-numpy
