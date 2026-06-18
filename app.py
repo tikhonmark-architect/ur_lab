@@ -89,6 +89,7 @@ def calculate_area_universal(geom):
 def wgs84_to_meters(geom):
     if geom is None or geom.is_empty:
         return geom
+    
     try:
         project = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         return transform(project.transform, geom)
@@ -97,7 +98,9 @@ def wgs84_to_meters(geom):
 
 def meters_to_wgs84(geom):
     if geom is None or geom.is_empty:
-        return geom    try:
+        return geom
+    
+    try:
         project = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
         return transform(project.transform, geom)
     except Exception:
