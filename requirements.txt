@@ -5,6 +5,3 @@ shapely
 pyproj
 pandas
 numpy
-ezdxf
-requests
-overpy
