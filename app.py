@@ -317,12 +317,13 @@ class UrbanPotentialAnalyzer:
         
         s_living = self.tep["s_living"]
         s_commercial = self.tep["s_commercial"]
+        s_total = self.tep["s_total"]
         
         revenue_living = s_living * sale_price_per_sqm
         revenue_commercial = s_commercial * sale_price_per_sqm * commercial_price_ratio
         total_revenue = revenue_living + revenue_commercial
         
-        construction_cost = self.tep["s_total"] * cost_per_sqm
+        construction_cost = s_total * cost_per_sqm
         infra_cost = (self.tep["schools"] * 1500000 + 
                       self.tep["kindergartens"] * 1200000 + 
                       self.tep["parking"] * 800000)
@@ -330,6 +331,7 @@ class UrbanPotentialAnalyzer:
         
         gross_profit = total_revenue - total_cost
         roi = (gross_profit / total_cost * 100) if total_cost > 0 else 0
+        profit_per_sqm = (gross_profit / s_total) if s_total > 0 else 0
         
         self.financials = {
             "revenue_living": round(revenue_living, 0),
@@ -341,7 +343,7 @@ class UrbanPotentialAnalyzer:
             "total_cost": round(total_cost, 0),
             "gross_profit": round(gross_profit, 0),
             "roi_percent": round(roi, 1),
-            "profit_per_sqm": round(gross_profit / self.tep["s_total"], 0) if self.tep["s_total"] > 0 else 0
+            "profit_per_sqm": round(profit_per_sqm, 0)
         }
         return self.financials
 
@@ -370,7 +372,6 @@ parcel_geom_wgs84 = None
 restrictions_geom_meters = None
 
 if data_source == "Загрузить свой файл":
-    # Показываем доступные форматы
     available_formats = ["GeoJSON (.geojson, .json)"]
     if DXF_AVAILABLE:
         available_formats.append("AutoCAD DXF (.dxf)")
@@ -378,23 +379,21 @@ if data_source == "Загрузить свой файл":
         available_formats.append("Shapefile (.zip)")
     
     st.info(f"""
-     **Поддерживаемые форматы:** {', '.join(available_formats)}
+    💡 **Поддерживаемые форматы:** {', '.join(available_formats)}
     
     ✅ **Рекомендуется GeoJSON** - работает на всех платформах.
     
-     **Как конвертировать в GeoJSON:**
+    📝 **Как конвертировать в GeoJSON:**
     - **AutoCAD:** File → Save As → DXF, затем откройте в QGIS и экспортируйте в GeoJSON
     - **Shapefile:** Откройте в QGIS → Export → Save Features As → GeoJSON
     """)
     
-    # Выбор формата
     file_format = st.selectbox(
         "Выберите формат файла:",
         available_formats,
         help="GeoJSON рекомендуется для стабильной работы"
     )
     
-    # Загрузка файла в зависимости от формата
     uploaded_file = None
     
     if file_format == "GeoJSON (.geojson, .json)":
@@ -416,7 +415,6 @@ if data_source == "Загрузить свой файл":
             key="main_parcel"
         )
     
-    # Ограничения (только GeoJSON)
     uploaded_restrictions = st.file_uploader(
         "2️ Загрузите GeoJSON с ограничениями (ЗОУИТ) - *опционально*",
         type=['geojson', 'json'],
@@ -427,7 +425,6 @@ if data_source == "Загрузить свой файл":
         try:
             file_content = uploaded_file.getvalue()
             
-            # Парсинг в зависимости от формата
             if file_format == "GeoJSON (.geojson, .json)":
                 geom = parse_geojson(file_content)
             elif file_format == "AutoCAD DXF (.dxf)":
@@ -438,7 +435,6 @@ if data_source == "Загрузить свой файл":
             if geom is None or geom.is_empty:
                 st.error("❌ Не удалось извлечь геометрию из файла")
             else:
-                # Определяем систему координат
                 coord_system = detect_coordinate_system(geom)
                 
                 if coord_system == "WGS84":
@@ -455,18 +451,16 @@ if data_source == "Загрузить свой файл":
                     parcel_geom_meters = geom
                     parcel_geom_wgs84 = meters_to_wgs84(geom)
                 
-                # Показываем площадь
                 real_area = calculate_geodesic_area(parcel_geom_wgs84)
                 st.success(f"**Реальная площадь: {real_area:,.0f} м² ({real_area/10000:.2f} га)**")
                 
-                # Загрузка ограничений
                 if uploaded_restrictions is not None:
                     try:
                         restrictions_content = uploaded_restrictions.getvalue()
                         restrictions_geom_wgs84 = parse_geojson(restrictions_content)
                         restrictions_geom_meters = wgs84_to_meters(restrictions_geom_wgs84)
                         restrictions_area = calculate_geodesic_area(restrictions_geom_wgs84)
-                        st.info(f"🚫 Загружены ограничения: **{restrictions_area:,.0f} м²** ({restrictions_area/10000:.2f} га)")
+                        st.info(f" Загружены ограничения: **{restrictions_area:,.0f} м²** ({restrictions_area/10000:.2f} га)")
                     except Exception as e:
                         st.warning(f"⚠️ Не удалось загрузить ограничения: {str(e)}")
             
@@ -487,23 +481,103 @@ else:
     parcel_geom_meters = wgs84_to_meters(parcel_geom_wgs84)
 
 # ============================================================================
-# ПАРАМЕТРЫ ПЗЗ И ФИНАНСОВ
+# ПАРАМЕТРЫ ПЗЗ И ФИНАНСОВ (РУЧНОЙ ВВОД)
 # ============================================================================
 
 if parcel_geom_meters is not None:
     st.sidebar.header("⚙️ Градостроительные параметры")
-    offset = st.sidebar.slider("Мин. отступ от границ (м)", 0, 30, 5)
-    density = st.sidebar.slider("Макс. плотность застройки", 0.1, 1.0, 0.4, 0.05)
-    floors = st.sidebar.slider("Предельная этажность", 1, 50, 9)
-    floor_height = st.sidebar.slider("Высота этажа (м)", 2.8, 4.5, 3.2, 0.1)
-    living_ratio = st.sidebar.slider("Доля жилой площади", 0.1, 1.0, 0.75, 0.05)
-    norm_housing = st.sidebar.slider("Норма жилья на чел. (кв.м)", 15, 50, 28)
+    
+    offset = st.sidebar.number_input(
+        "Мин. отступ от границ (м)",
+        min_value=0.0,
+        max_value=100.0,
+        value=5.0,
+        step=0.5,
+        help="Отступ от красных линий участка"
+    )
+    
+    density = st.sidebar.number_input(
+        "Макс. плотность застройки",
+        min_value=0.05,
+        max_value=1.0,
+        value=0.40,
+        step=0.01,
+        help="Коэффициент застройки (0.05 - 1.0)"
+    )
+    
+    floors = st.sidebar.number_input(
+        "Предельная этажность",
+        min_value=1,
+        max_value=100,
+        value=9,
+        step=1,
+        help="Количество этажей"
+    )
+    
+    floor_height = st.sidebar.number_input(
+        "Высота этажа (м)",
+        min_value=2.5,
+        max_value=6.0,
+        value=3.2,
+        step=0.1,
+        help="Высота одного этажа в метрах"
+    )
+    
+    living_ratio = st.sidebar.number_input(
+        "Доля жилой площади",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.75,
+        step=0.01,
+        help="Доля жилой площади от общей (0.0 - 1.0)"
+    )
+    
+    norm_housing = st.sidebar.number_input(
+        "Норма жилья на чел. (кв.м)",
+        min_value=10.0,
+        max_value=100.0,
+        value=28.0,
+        step=1.0,
+        help="Норматив жилой площади на одного человека"
+    )
     
     st.sidebar.header("💰 Финансовые параметры")
-    cost_per_sqm = st.sidebar.slider("Себестоимость (₽/м²)", 50000, 200000, 90000, 5000)
-    sale_price = st.sidebar.slider("Цена продажи жилья (₽/м²)", 100000, 700000, 250000, 10000)
-    commercial_ratio = st.sidebar.slider("Коэфф. цены коммерции", 0.5, 1.5, 0.85, 0.05)
-    land_cost = st.sidebar.slider("Стоимость земли (млн ₽)", 0, 500, 50, 5)
+    
+    cost_per_sqm = st.sidebar.number_input(
+        "Себестоимость строительства (₽/м²)",
+        min_value=10000,
+        max_value=500000,
+        value=90000,
+        step=1000,
+        help="Стоимость строительства 1 м² общей площади"
+    )
+    
+    sale_price = st.sidebar.number_input(
+        "Цена продажи жилья (₽/м²)",
+        min_value=50000,
+        max_value=2000000,
+        value=250000,
+        step=5000,
+        help="Рыночная цена продажи 1 м² жилой площади"
+    )
+    
+    commercial_ratio = st.sidebar.number_input(
+        "Коэфф. цены коммерции",
+        min_value=0.1,
+        max_value=3.0,
+        value=0.85,
+        step=0.05,
+        help="Множитель к цене жилья для коммерческих помещений"
+    )
+    
+    land_cost = st.sidebar.number_input(
+        "Стоимость земли (млн ₽)",
+        min_value=0.0,
+        max_value=10000.0,
+        value=50.0,
+        step=1.0,
+        help="Стоимость приобретения земельного участка"
+    )
 
     pzz_config = {
         "min_offset_from_border": offset,
@@ -524,11 +598,16 @@ if parcel_geom_meters is not None:
     buildable_geom_meters = analyzer.buildable_geom
     buildable_geom_wgs84 = analyzer.buildable_geom_wgs84
 
+    # Проверка на нулевые значения
+    if tep['s_total'] <= 0:
+        st.error("❌ **Ошибка расчета:** Общая площадь равна нулю. Проверьте параметры (отступы, плотность, этажность).")
+        st.stop()
+
     # ========================================================================
     # ОТОБРАЖЕНИЕ ТЭП
     # ========================================================================
     
-    st.header(" Технико-экономические показатели")
+    st.header("📊 Технико-экономические показатели")
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Площадь участка", f"{tep['s_uch']:,.0f} м²", f"{tep['s_uch_ha']} га")
@@ -537,16 +616,25 @@ if parcel_geom_meters is not None:
     col4.metric("Этажность", f"{tep['floors']} эт", f"{tep['building_height_m']} м")
 
     st.subheader("🏗️ Структура площадей")
+    
+    # Защита от деления на ноль
+    if tep['s_total'] > 0:
+        living_percent = (tep['s_living'] / tep['s_total']) * 100
+        commercial_percent = (tep['s_commercial'] / tep['s_total']) * 100
+    else:
+        living_percent = 0
+        commercial_percent = 0
+    
     area_cols = st.columns(3)
-    area_cols[0].info(f"🏠 **Жилая:** {tep['s_living']:,.0f} м² ({tep['s_living']/tep['s_total']*100:.1f}%)")
-    area_cols[1].info(f"🏢 **Коммерция:** {tep['s_commercial']:,.0f} м² ({tep['s_commercial']/tep['s_total']*100:.1f}%)")
+    area_cols[0].info(f"🏠 **Жилая:** {tep['s_living']:,.0f} м² ({living_percent:.1f}%)")
+    area_cols[1].info(f"🏢 **Коммерция:** {tep['s_commercial']:,.0f} м² ({commercial_percent:.1f}%)")
     area_cols[2].info(f"🌳 **Озеленение:** {tep['green_space']:,.0f} м²")
 
     st.subheader("👥 Социальная инфраструктура")
     infra_cols = st.columns(4)
-    infra_cols[0].info(f" **Население:** {tep['population']:,} чел")
-    infra_cols[1].info(f"🏫 **Школы:** {tep['schools']} мест")
-    infra_cols[2].info(f"🧸 **Дет. сады:** {tep['kindergartens']} мест")
+    infra_cols[0].info(f"👪 **Население:** {tep['population']:,} чел")
+    infra_cols[1].info(f" **Школы:** {tep['schools']} мест")
+    infra_cols[2].info(f" **Дет. сады:** {tep['kindergartens']} мест")
     infra_cols[3].info(f"🚗 **Парковка:** {tep['parking']} м/м")
 
     # ========================================================================
@@ -583,7 +671,7 @@ if parcel_geom_meters is not None:
     latitude = centroid_wgs84.y
     shadow_length = calculate_shadow_length(building_height, latitude)
     
-    st.info(f"🏢 **Высота здания:** {building_height:.1f} м | **Широта:** {latitude:.2f}° | **Длина тени:** {shadow_length:.1f} м")
+    st.info(f" **Высота здания:** {building_height:.1f} м | **Широта:** {latitude:.2f}° | **Длина тени:** {shadow_length:.1f} м")
     
     if shadow_length > 50:
         st.warning(f"⚠️ Тень достигает **{shadow_length:.0f}м**. Рекомендуется детальная инсоляционная экспертиза!")
@@ -699,7 +787,7 @@ if parcel_geom_meters is not None:
         obj_content = create_obj_file(buildable_geom_meters, building_height)
         if obj_content:
             st.download_button(
-                label=" 3D модель (OBJ)",
+                label="🏢 3D модель (OBJ)",
                 data=io.BytesIO(obj_content.encode()),
                 file_name="building_3d.obj",
                 mime="text/plain"
@@ -741,4 +829,4 @@ else:
     st.warning("⚠️ Загрузите файл с границами участка или выберите тестовые данные для начала анализа.")
 
 st.markdown("---")
-st.caption("️ Urban Potential Analyzer PRO | Точный геодезический расчет на эллипсоиде WGS84")
+st.caption("🛠️ Urban Potential Analyzer PRO | Точный геодезический расчет на эллипсоиде WGS84")
