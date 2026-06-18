@@ -89,7 +89,6 @@ def calculate_area_universal(geom):
 def wgs84_to_meters(geom):
     if geom is None or geom.is_empty:
         return geom
-    
     try:
         project = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         return transform(project.transform, geom)
@@ -99,7 +98,6 @@ def wgs84_to_meters(geom):
 def meters_to_wgs84(geom):
     if geom is None or geom.is_empty:
         return geom
-    
     try:
         project = pyproj.Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
         return transform(project.transform, geom)
@@ -149,7 +147,8 @@ PZZ_TEMPLATES = {
 }
 
 def detect_pzz_zone(lon, lat):
-    if not OVERPY_AVAILABLE:        return "residential_mid", [], [], 0
+    if not OVERPY_AVAILABLE:
+        return "residential_mid", [], [], 0
     try:
         api = overpy.Overpass()
         query = f"""
@@ -198,7 +197,8 @@ def detect_pzz_zone(lon, lat):
         return "residential_mid", [], [], 0
 
 def reverse_geocode(lon, lat):
-    try:        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
         headers = {"User-Agent": "UrbanPotentialAnalyzer/2.0"}
         response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
@@ -247,7 +247,8 @@ def create_obj_file(geometry, height_meters):
         roof_face = "f " + " ".join(str(i + 1 + n) for i in range(n))
         lines.append(roof_face)
         for i in range(n):
-            next_i = (i + 1) % n            side_face = f"f {i + 1} {next_i + 1} {next_i + 1 + n} {i + 1 + n}"
+            next_i = (i + 1) % n
+            side_face = f"f {i + 1} {next_i + 1} {next_i + 1 + n} {i + 1 + n}"
             lines.append(side_face)
         return "\n".join(lines)
     except Exception:
@@ -296,6 +297,7 @@ def create_dxf_file(parcel_geom, buildable_geom, tep, financials, building_heigh
                 p3 = (coords[i+1][0], coords[i+1][1], building_height)
                 p4 = (coords[i][0], coords[i][1], building_height)
                 msp.add_3dface([p1, p2, p3, p4], dxfattribs={'layer': 'BUILDING_3D'})
+
         text_x, text_y = 20, -20
         texts = [
             "=== URBAN ANALYSIS ===",
@@ -345,7 +347,8 @@ class UrbanPotentialAnalyzer:
             else:
                 restrictions_work = self.restrictions
             buildable = buildable.difference(restrictions_work)
-        self.buildable_geom = buildable        self.buildable_area, _ = calculate_area_universal(buildable)
+        self.buildable_geom = buildable
+        self.buildable_area, _ = calculate_area_universal(buildable)
         return buildable
 
     def calculate_tep(self):
@@ -394,7 +397,8 @@ class UrbanPotentialAnalyzer:
         s_commercial = self.tep["s_commercial"]
         revenue_living = s_living * sale_price_per_sqm
         revenue_commercial = s_commercial * sale_price_per_sqm * commercial_price_ratio
-        total_revenue = revenue_living + revenue_commercial        construction_cost = self.tep["s_total"] * cost_per_sqm
+        total_revenue = revenue_living + revenue_commercial
+        construction_cost = self.tep["s_total"] * cost_per_sqm
         infra_cost = (
             self.tep["schools"] * 1500000 +
             self.tep["kindergartens"] * 1200000 +
@@ -443,7 +447,8 @@ if data_source == "Загрузить GeoJSON":
         "Загрузите GeoJSON с границами участка",
         type=['geojson', 'json'],
         key="main_parcel"
-    )    if uploaded_file is not None:
+    )
+    if uploaded_file is not None:
         try:
             geojson_data = json.loads(uploaded_file.getvalue().decode("utf-8"))
             if geojson_data['type'] == 'FeatureCollection':
@@ -492,7 +497,8 @@ if parcel_geom is not None:
         st.write(f"**Описание:** {suggested_pzz['description']}")
         st.caption(f"📍 Адрес: {address[:80]}...")
     with col2:
-        st.metric("Средняя этажность рядом", f"{avg_levels:.1f} эт" if avg_levels > 0 else "N/A")        st.caption(f"Найдено объектов: {len(buildings)}")
+        st.metric("Средняя этажность рядом", f"{avg_levels:.1f} эт" if avg_levels > 0 else "N/A")
+        st.caption(f"Найдено объектов: {len(buildings)}")
     with st.expander("🔍 Детали анализа окружения"):
         st.write(f"**Landuse теги:** {', '.join(set(landuses)) if landuses else 'не найдено'}")
         st.write(f"**Building теги:** {', '.join(set(buildings)) if buildings else 'не найдено'}")
@@ -541,7 +547,8 @@ if parcel_geom is not None:
     if tep['s_total'] == 0:
         st.error("🚨 **Пятно застройки пустое!**")
         st.warning(f"""
-        **Причина:** Невозможно построить здание с текущими параметрами.        - Уменьшить отступы от границ (сейчас: {pzz_config['min_offset_from_border']} м)
+        **Причина:** Невозможно построить здание с текущими параметрами.
+        - Уменьшить отступы от границ (сейчас: {pzz_config['min_offset_from_border']} м)
         - Увеличить плотность застройки (сейчас: {pzz_config['max_building_density']})
         - Проверить ЗОУИТ — возможно, они перекрывают весь участок
         """)
@@ -590,7 +597,8 @@ if parcel_geom is not None:
     latitude = center_lat if coord_system_detected == 'geographic' else 55.75
     shadow_length = calculate_shadow_length(building_height, latitude)
     st.info(f"🏢 **Высота:** {building_height:.1f} м | **Широта:** {latitude:.2f}° | **Тень зимой:** {shadow_length:.1f} м")
-    if shadow_length > 50:        st.warning(f"⚠️ Тень достигает {shadow_length:.0f}м — нужна детальная экспертиза")
+    if shadow_length > 50:
+        st.warning(f"⚠️ Тень достигает {shadow_length:.0f}м — нужна детальная экспертиза")
 
     # --- КАРТА ---
     st.header("🗺️ Карта территории")
@@ -639,7 +647,8 @@ if parcel_geom is not None:
         csv_buffer = io.StringIO()
         writer = csv.writer(csv_buffer)
         writer.writerow(["Показатель", "Значение", "Ед.изм."])
-        for k, v in tep.items():            writer.writerow([k, v, ""])
+        for k, v in tep.items():
+            writer.writerow([k, v, ""])
         for k, v in financials.items():
             writer.writerow([k, v, ""])
         st.download_button(
@@ -689,6 +698,7 @@ if parcel_geom is not None:
                 st.warning("Ошибка генерации DXF")
         else:
             st.warning("Библиотека ezdxf не установлена")
+
     with exp2[1]:
         st.info("💡 **IFC экспорт:** Установите `ifcopenshell` локально для BIM-интеграции с Revit/ArchiCAD")
         st.caption("В веб-версии IFC недоступен из-за тяжёлых зависимостей. Используйте DXF.")
