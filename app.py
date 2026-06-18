@@ -47,7 +47,8 @@ def detect_coordinate_system(geom):
         if -180 <= x_min and x_max <= 180 and -90 <= y_min and y_max <= 90:
             return 'geographic'
         else:
-            return 'projected'    except Exception:
+            return 'projected'
+    except Exception:
         return None
 
 def calculate_geodesic_area(geom_wgs84):
