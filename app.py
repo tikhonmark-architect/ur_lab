@@ -13,7 +13,7 @@ from datetime import datetime
 # НАСТРОЙКА СТРАНИЦЫ
 # ============================================================================
 st.set_page_config(page_title="Градостроительный Потенциал PRO", layout="wide")
-st.title("🏙️ Анализатор градостроительного потенциала PRO")
+st.title("️ Анализатор градостроительного потенциала PRO")
 st.markdown("**Поддержка МСК-50 (зона 1, 2) | WGS84 | Web Mercator**")
 
 # ============================================================================
@@ -52,14 +52,19 @@ def calculate_area_approx(geom):
     return geom.area
 
 # ============================================================================
-# КОНВЕРТАЦИЯ МСК-50 -> WGS84 (ТОЧНЫЕ ПАРАМЕТРЫ)
+# КОНВЕРТАЦИЯ МСК-50 -> WGS84 (ИСПРАВЛЕННАЯ)
 # ============================================================================
 
-def msk50_to_wgs84(x, y, zone=1):
+def msk50_to_wgs84(x, y, zone=1, swap_xy=False):
     """
     Конвертация координат из МСК-50 в WGS84.
+    x: восток (easting), y: север (northing) в метрах
     zone: 1 (35°29'), 2 (38°29')
+    swap_xy: если True, поменять X и Y местами
     """
+    if swap_xy:
+        x, y = y, x
+    
     # Параметры эллипсоида Красовского
     a = 6378245.0
     f = 1.0 / 298.3
@@ -67,7 +72,7 @@ def msk50_to_wgs84(x, y, zone=1):
     e_prime2 = e2 / (1 - e2)
     
     # Точные центральные меридианы МСК-50
-    central_meridians = {1: 35.4833333333, 2: 38.4833333333} # 35°29' и 38°29'
+    central_meridians = {1: 35.4833333333, 2: 38.4833333333}
     lon0 = math.radians(central_meridians.get(zone, 35.4833333333))
     
     # Ложные начала (False Easting) для МСК-50
@@ -80,6 +85,7 @@ def msk50_to_wgs84(x, y, zone=1):
     x_prime = x - x0
     y_prime = y - y0
     
+    # Меридиональная дуга
     M = y_prime / k0
     mu = M / (a * (1 - e2/4 - 3*e2**2/64 - 5*e2**3/256))
     
@@ -112,13 +118,31 @@ def msk50_to_wgs84(x, y, zone=1):
         (5 - 2*C1 + 28*T1 - 3*C1**2 + 8*e_prime2 + 24*T1**2) * D**5/120
     ) / cos_phi1
     
-    # Упрощённая трансформация Пулково-42 -> WGS84
-    lat_wgs84 = math.degrees(phi) - 0.000016 
-    lon_wgs84 = math.degrees(lon) - 0.000016 
+    # Трансформация Пулково-42 -> WGS84 (7-параметрическая, упрощённая)
+    # Параметры для Московской области
+    dx = -23.57  # метры
+    dy = -140.95  # метры
+    dz = -79.80  # метры
+    
+    lat_rad = phi
+    lon_rad = lon
+    
+    # Радиусы кривизны
+    N = a / math.sqrt(1 - e2 * math.sin(lat_rad)**2)
+    
+    # Приращения в радианах
+    dlat = (dx * math.sin(lat_rad) * math.cos(lon_rad) + 
+            dy * math.sin(lat_rad) * math.sin(lon_rad) - 
+            dz * math.cos(lat_rad)) / (a * (1 - e2 * math.sin(lat_rad)**2))
+    
+    dlon = (-dx * math.sin(lon_rad) + dy * math.cos(lon_rad)) / (N * math.cos(lat_rad))
+    
+    lat_wgs84 = math.degrees(lat_rad + dlat)
+    lon_wgs84 = math.degrees(lon_rad + dlon)
     
     return lon_wgs84, lat_wgs84
 
-def convert_geom_to_wgs84(geom, crs_type, ref_lat=55.75, ref_lon=37.62):
+def convert_geom_to_wgs84(geom, crs_type, ref_lat=55.75, ref_lon=37.62, swap_xy=False):
     """Конвертирует геометрию в WGS84 для отображения на карте"""
     if crs_type == 'wgs84' or is_in_degrees(geom):
         return geom
@@ -130,7 +154,7 @@ def convert_geom_to_wgs84(geom, crs_type, ref_lat=55.75, ref_lon=37.62):
             zone = 1
             
         def project_msk50(x, y):
-            return msk50_to_wgs84(x, y, zone)
+            return msk50_to_wgs84(x, y, zone, swap_xy)
         return transform(project_msk50, geom)
     
     elif crs_type == 'web_mercator':
@@ -225,23 +249,33 @@ original_geom = None
 manual_area = None
 crs_type = "wgs84"
 ref_lat, ref_lon = 55.75, 37.62
+swap_xy = False
 
 if data_source == "Загрузить GeoJSON":
     uploaded = st.file_uploader("Загрузите .geojson или .json", type=['geojson', 'json'])
     if uploaded:
         try:
             original_geom = parse_geojson(uploaded.getvalue())
+            
+            # Диагностика
+            bounds = original_geom.bounds
+            st.info(f" **Диапазон координат:** X: {bounds[0]:.0f} - {bounds[2]:.0f}, Y: {bounds[1]:.0f} - {bounds[3]:.0f}")
+            
             if is_in_degrees(original_geom):
                 crs_type = "wgs84"
                 st.success("✅ Определена система: WGS84 (градусы)")
             else:
-                st.info("⚠️ Координаты в метрах. Выберите систему координат.")
+                st.warning("⚠️ Координаты в метрах. Выберите систему координат.")
                 crs_type = st.selectbox(
-                    "Система координат исходного файла:", 
+                    "Система координат:", 
                     ["msk50_zone1", "msk50_zone2", "web_mercator", "local_meters"], 
-                    index=0,
-                    help="МСК-50 зона 1 (35°29' - запад МО), зона 2 (38°29' - восток МО)"
+                    index=0
                 )
+                
+                if crs_type.startswith('msk50'):
+                    swap_xy = st.checkbox("🔄 Поменять X и Y местами", value=False, 
+                                         help="Если участок отображается в Африке, попробуйте включить эту опцию")
+                
                 if crs_type == "local_meters":
                     col1, col2 = st.columns(2)
                     ref_lat = col1.number_input("Широта центра", value=55.75, step=0.01)
@@ -253,13 +287,13 @@ if data_source == "Загрузить GeoJSON":
             if use_manual:
                 manual_area = st.number_input("Площадь участка (м²):", min_value=1.0, value=float(area_auto), step=10.0)
         except Exception as e:
-            st.error(f" Ошибка файла: {str(e)}")
+            st.error(f"❌ Ошибка файла: {str(e)}")
 else:
     original_geom = Polygon([(37.615, 55.752), (37.6175, 55.752), (37.6175, 55.7535), (37.615, 55.7535)])
     st.info("Используется тестовый участок (Москва)")
 
 if original_geom is not None:
-    st.sidebar.header("️ Градостроительные параметры")
+    st.sidebar.header("⚙️ Градостроительные параметры")
     offset = st.sidebar.number_input("Отступ (м)", 0.0, 50.0, 5.0, 0.5)
     density = st.sidebar.number_input("Плотность застройки", 0.05, 1.0, 0.4, 0.01)
     floors = st.sidebar.number_input("Этажность", 1, 100, 9, 1)
@@ -267,7 +301,7 @@ if original_geom is not None:
     living_ratio = st.sidebar.number_input("Доля жилья", 0.0, 1.0, 0.75, 0.01)
     norm = st.sidebar.number_input("Норма (м²/чел)", 10, 50, 28, 1)
     
-    st.sidebar.header("💰 Финансы")
+    st.sidebar.header(" Финансы")
     cost = st.sidebar.number_input("Себестоимость (₽/м²)", 10000, 300000, 90000, 1000)
     price = st.sidebar.number_input("Цена продажи (₽/м²)", 50000, 1000000, 250000, 5000)
     comm_ratio = st.sidebar.number_input("Коэф. коммерции", 0.1, 3.0, 0.85, 0.05)
@@ -285,7 +319,7 @@ if original_geom is not None:
         st.error("❌ Площадь застройки = 0. Уменьшите отступы или увеличьте плотность/этажность.")
         st.stop()
 
-    st.header(" Технико-экономические показатели")
+    st.header("📊 Технико-экономические показатели")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Участок", f"{tep['s_uch']:,.0f} м²", f"{tep['s_uch_ha']} га")
     c2.metric("Пятно застройки", f"{tep['s_buildable']:,.0f} м²")
@@ -307,12 +341,21 @@ if original_geom is not None:
     f4.metric("ROI", f"{fin['roi']:.1f}%", delta_color=p_color)
 
     st.header("🗺️ Карта территории")
-    map_geom = convert_geom_to_wgs84(original_geom, crs_type, ref_lat, ref_lon)
-    map_buildable = convert_geom_to_wgs84(analyzer.buildable_geom, crs_type, ref_lat, ref_lon) if analyzer.buildable_geom else None
+    map_geom = convert_geom_to_wgs84(original_geom, crs_type, ref_lat, ref_lon, swap_xy)
+    map_buildable = convert_geom_to_wgs84(analyzer.buildable_geom, crs_type, ref_lat, ref_lon, swap_xy) if analyzer.buildable_geom else None
     
     bounds = map_geom.bounds
     center = [(bounds[1]+bounds[3])/2, (bounds[0]+bounds[2])/2]
-    m = folium.Map(location=center, zoom_start=12, tiles="OpenStreetMap")
+    
+    # Проверка, что координаты в разумных пределах (Московская область)
+    if center[0] < 50 or center[0] > 60 or center[1] < 30 or center[1] > 45:
+        st.error(f" **Координаты вне Московской области!** Центр: {center[0]:.4f}°, {center[1]:.4f}°")
+        st.warning(" Попробуйте включить опцию **'🔄 Поменять X и Y местами'** выше")
+        zoom = 10
+    else:
+        zoom = 15
+    
+    m = folium.Map(location=center, zoom_start=zoom, tiles="OpenStreetMap")
     
     folium.GeoJson({"type":"Feature","geometry":mapping(map_geom)}, 
                    style_function=lambda x: {"fillColor":"gray","fillOpacity":0.1,"color":"red","weight":3},
@@ -337,7 +380,7 @@ if original_geom is not None:
     
     st.success(f"✅ Анализ завершён. Система координат: **{crs_type.upper().replace('_', ' ')}**")
 else:
-    st.warning("⚠️ Загрузите файл или выберите тестовый участок")
+    st.warning("️ Загрузите файл или выберите тестовый участок")
 
 st.markdown("---")
 st.caption("🛠️ Urban Analyzer PRO | Чистый Python | МСК-50 (Зона 1: 35°29', Зона 2: 38°29')")
